@@ -1,0 +1,86 @@
+import React, { useEffect, useState } from 'react';
+import LeftSidebar, { ViewMode } from './components/LeftSidebar';
+import UserListPanel from './components/UserListPanel';
+import ChatPanel from './components/ChatPanel';
+import Settings from './components/Settings';
+import { useUserStore } from './stores/userStore';
+import { useMessageStore } from './stores/messageStore';
+import { useConfigStore } from './stores/configStore';
+
+function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>('chat');
+  const loadUsers = useUserStore((s) => s.loadUsers);
+  const discoverUsers = useUserStore((s) => s.discoverUsers);
+  const initUserListeners = useUserStore((s) => s.initListeners);
+  const initMessageListeners = useMessageStore((s) => s.initListeners);
+  const loadConfig = useConfigStore((s) => s.loadConfig);
+  const currentUser = useUserStore((s) => s.currentUser);
+  const loadLocalUserId = useMessageStore((s) => s.loadLocalUserId);
+  const messageVersion = useMessageStore((s) => s.messageVersion);
+
+  console.log('[App] Rendering, initMessageListeners type:', typeof initMessageListeners);
+
+  // Debug: log effect registration
+  useEffect(() => {
+    console.log('[App] useEffect START: registering listeners...');
+    console.log('[App] initMessageListeners defined');
+    // Register event listeners FIRST - these must be outside async init
+    if (typeof initUserListeners !== 'function') {
+      console.error('[App] initUserListeners is NOT a function!');
+    }
+    if (typeof initMessageListeners !== 'function') {
+      console.error('[App] initMessageListeners is NOT a function!');
+    }
+    const unsubUsers = initUserListeners();
+    const unsubMessages = initMessageListeners();
+    console.log('[App] Listeners registered successfully');
+
+    // Then do async init: load config, users, discover
+    const init = async () => {
+      await loadConfig();
+      await loadUsers();
+      await discoverUsers();
+      await loadLocalUserId();
+    };
+
+    init();
+
+    return () => {
+      unsubUsers();
+      unsubMessages();
+    };
+  }, []);
+
+  // Force ChatPanel to remount when currentUser changes or new messages arrive
+  const chatKey = currentUser ? `${currentUser.id}-${messageVersion}` : 'empty';
+
+  return (
+    <div className="flex h-screen w-screen bg-gray-100">
+      <LeftSidebar viewMode={viewMode} onViewChange={setViewMode} />
+      <UserListPanel viewMode={viewMode} onViewChange={setViewMode} />
+      {viewMode === 'settings' ? (
+        <Settings onClose={() => setViewMode('chat')} />
+      ) : currentUser ? (
+        <ChatPanel key={chatKey} />
+      ) : (
+        <EmptyChatView />
+      )}
+    </div>
+  );
+}
+
+function EmptyChatView() {
+  return (
+    <div className="flex-1 flex items-center justify-center bg-white">
+      <div className="text-center text-gray-400">
+        <svg className="mx-auto mb-4 w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+            d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+        </svg>
+        <p className="text-lg">选择一个用户开始聊天</p>
+      </div>
+    </div>
+  );
+}
+
+export default App;
