@@ -1,0 +1,26 @@
+{
+  "target_ip": "127.0.0.1",
+  "target_port": 2525,
+  "tests": [
+    {
+      "type": "text",
+      "content": "Hello from IPMsgPro! 你好，世界！",
+      "delay_ms": 2000
+    },
+    {
+      "type": "text",
+      "content": "这是第二条测试消息，包含中文。",
+      "delay_ms": 2000
+    },
+    {
+      "type": "file",
+      "content": "D:\\Work\\CPlusPlus\\IPMsgPro\\build\\Release\\ipmsg_test_send_file.bin",
+      "delay_ms": 5000
+    },
+    {
+      "type": "text",
+      "content": "文件发送完成，这是确认消息。",
+      "delay_ms": 2000
+    }
+  ]
+}

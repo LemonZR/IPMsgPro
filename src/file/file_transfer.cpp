@@ -1,0 +1,845 @@
+// ============================================================================
+// File Transfer Manager Implementation
+// TCP-based file sending/receiving for IPMsg protocol
+// Protocol reference: ipmsg-master and feiq (FeiQ) source code
+// ============================================================================
+
+#include "file_transfer.h"
+#include "ipmsg/protocol.h"
+#include "ipmsg/msgmng.h"  // for MsgLog
+#include <fstream>
+#include <sstream>
+#include <chrono>
+#include <random>
+#include <filesystem>
+#include <iomanip>
+#include <algorithm>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <Lmcons.h>  // UNLEN for GetUserNameA
+#endif
+
+namespace {
+    void WriteTransferLog(const std::string& msg) {
+        ipmsg::MsgLog("[FILE_XFER] " + msg);
+    }
+}
+
+namespace ipmsg {
+
+namespace fs = std::filesystem;
+
+FileTransferManager::FileTransferManager() = default;
+
+FileTransferManager::~FileTransferManager() {
+    Shutdown();
+}
+
+bool FileTransferManager::Init(int tcpPort) {
+    if (ready_) return true;
+
+    // Use same port as UDP for TCP (IPMsg protocol uses same port for both)
+    int basePort = (tcpPort == 0) ? IPMSG_DEFAULT_PORT : tcpPort;
+
+    // Try to bind to the base port; if fails, try basePort+1, basePort+2
+    const int maxRetries = 3;
+    bool bindSuccess = false;
+
+    for (int attempt = 0; attempt < maxRetries; attempt++) {
+        tcpPort_ = basePort + attempt;
+
+        // Create TCP listening socket
+        tcpListenSocket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (tcpListenSocket_ == INVALID_SOCKET) {
+            MsgLog("[FileTransfer] Failed to create TCP socket: " + std::to_string(WSAGetLastError()));
+            return false;
+        }
+
+        // Set socket options
+        int optval = 1;
+        setsockopt(tcpListenSocket_, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char*>(&optval), sizeof(optval));
+
+        // Bind to port
+        sockaddr_in addr = {};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(static_cast<u_short>(tcpPort_));
+
+        if (bind(tcpListenSocket_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != SOCKET_ERROR) {
+            bindSuccess = true;
+            break; // Bind succeeded
+        }
+
+        int bindErr = WSAGetLastError();
+        MsgLog("[FileTransfer] Failed to bind TCP port " + std::to_string(tcpPort_) + ": " + std::to_string(bindErr) + " (will try next port)");
+        closesocket(tcpListenSocket_);
+        tcpListenSocket_ = INVALID_SOCKET;
+    }
+
+    if (!bindSuccess) {
+        MsgLog("[FileTransfer] Failed to bind any TCP port after " + std::to_string(maxRetries) + " attempts");
+        return false;
+    }
+
+    // Listen for connections
+    if (listen(tcpListenSocket_, SOMAXCONN) == SOCKET_ERROR) {
+        MsgLog("[FileTransfer] Failed to listen: " + std::to_string(WSAGetLastError()));
+        closesocket(tcpListenSocket_);
+        tcpListenSocket_ = INVALID_SOCKET;
+        return false;
+    }
+
+    MsgLog("[FileTransfer] TCP server listening on port " + std::to_string(tcpPort_));
+
+    // Start accept thread
+    running_ = true;
+    acceptThread_ = std::thread(&FileTransferManager::AcceptThreadFunc, this);
+
+    ready_ = true;
+    return true;
+}
+
+void FileTransferManager::Shutdown() {
+    if (!ready_) return;
+
+    running_ = false;
+
+    // Close listening socket to unblock accept
+    if (tcpListenSocket_ != INVALID_SOCKET) {
+        closesocket(tcpListenSocket_);
+        tcpListenSocket_ = INVALID_SOCKET;
+    }
+
+    // Wait for accept thread
+    if (acceptThread_.joinable()) {
+        acceptThread_.join();
+    }
+
+    // Cancel all active transfers
+    {
+        std::lock_guard<std::mutex> lock(transfersMutex_);
+        for (auto& [id, transfer] : transfers_) {
+            if (transfer.status == TransferStatus::Transferring) {
+                transfer.status = TransferStatus::Cancelled;
+            }
+        }
+    }
+
+    ready_ = false;
+    MsgLog("[FileTransfer] Shutdown complete");
+}
+
+void FileTransferManager::AcceptThreadFunc() {
+    while (running_) {
+        sockaddr_in clientAddr = {};
+        int addrLen = sizeof(clientAddr);
+
+        SOCKET clientSocket = accept(tcpListenSocket_, 
+                                     reinterpret_cast<sockaddr*>(&clientAddr), 
+                                     &addrLen);
+
+        if (clientSocket == INVALID_SOCKET) {
+            if (running_) {
+                MsgLog("[FileTransfer] Accept failed: " + std::to_string(WSAGetLastError()));
+            }
+            continue;
+        }
+
+        MsgLog("[FileTransfer] Incoming connection from " +
+               std::string(inet_ntoa(clientAddr.sin_addr)) + ":" + std::to_string(ntohs(clientAddr.sin_port)));
+
+        // Handle connection in a new thread
+        std::thread([this, clientSocket, clientAddr]() {
+            HandleClientConnection(clientSocket, clientAddr);
+        }).detach();
+    }
+}
+
+void FileTransferManager::HandleClientConnection(SOCKET clientSocket, 
+                                                  const sockaddr_in& clientAddr) {
+    char buffer[4096] = {};
+    int received = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+
+    if (received <= 0) {
+        closesocket(clientSocket);
+        return;
+    }
+
+    std::string request(buffer, received);
+    WriteTransferLog("=== RECEIVED TCP REQUEST FROM " + std::string(inet_ntoa(clientAddr.sin_addr)) + ":" + std::to_string(ntohs(clientAddr.sin_port)) + " ===");
+    WriteTransferLog("Request length: " + std::to_string(received) + " bytes");
+    
+    // Print raw hex dump
+    std::ostringstream hexDump;
+    for (int i = 0; i < received; i++) {
+        if (i % 16 == 0) hexDump << "\n0x" << std::hex << std::setfill('0') << std::setw(4) << i << ": ";
+        hexDump << std::hex << std::setfill('0') << std::setw(2) << (unsigned int)(unsigned char)buffer[i] << " ";
+        if (i % 16 == 15) {
+            hexDump << " ";
+            for (int j = i - 15; j <= i; j++) {
+                if (buffer[j] >= 32 && buffer[j] <= 126) {
+                    hexDump << buffer[j];
+                } else {
+                    hexDump << ".";
+                }
+            }
+        }
+    }
+    WriteTransferLog("Raw hex dump:" + hexDump.str());
+    
+    // Print as string (replace non-printable chars)
+    std::string printableStr;
+    for (int i = 0; i < received; i++) {
+        if (buffer[i] >= 32 && buffer[i] <= 126) {
+            printableStr += buffer[i];
+        } else if (buffer[i] == '\0') {
+            printableStr += "\\0";
+        } else if (buffer[i] == '\n') {
+            printableStr += "\\n";
+        } else if (buffer[i] == '\r') {
+            printableStr += "\\r";
+        } else {
+            printableStr += "\\x" + std::to_string((unsigned int)(unsigned char)buffer[i]);
+        }
+    }
+    WriteTransferLog("Printable string: " + printableStr);
+    WriteTransferLog("=== END REQUEST ===");
+
+    // Parse IPMsg protocol header
+    // Format: ver:packetNo:userName:hostName:command:body[\0extra]
+    std::istringstream iss(request);
+    std::string verStr, pktNoStr, userName, hostName, cmdStr, body;
+
+    if (!std::getline(iss, verStr, ':') ||
+        !std::getline(iss, pktNoStr, ':') ||
+        !std::getline(iss, userName, ':') ||
+        !std::getline(iss, hostName, ':') ||
+        !std::getline(iss, cmdStr, ':')) {
+        MsgLog("[FileTransfer] Failed to parse IPMsg header");
+        closesocket(clientSocket);
+        return;
+    }
+
+    // Read the rest as body (may contain ':')
+    std::getline(iss, body, '\0');
+
+    uint32_t command = 0;
+    try { command = std::stoul(cmdStr, nullptr, 10); } catch (...) {}
+
+    // Check command type
+    uint32_t cmdMode = command & 0x000000ff;  // Lower byte = command mode
+    WriteTransferLog("Parsed command: " + std::to_string(command) + ", mode=0x" + 
+                     ([](uint32_t v)->std::string{std::ostringstream o;o<<std::hex<<v;return o.str();})(cmdMode));
+
+    if (cmdMode != IPMSG_GETFILEDATA && cmdMode != IPMSG_GETDIRFILES) {
+        WriteTransferLog("Unknown command mode: 0x" + 
+                         ([](uint32_t v)->std::string{std::ostringstream o;o<<std::hex<<v;return o.str();})(cmdMode) +
+                         ", closing connection");
+        closesocket(clientSocket);
+        return;
+    }
+
+    // Find the extra data
+    // FeiQ format: no \0 separator, extra data directly follows command field
+    // Standard IPMsg format: \0 separates body and extra
+    std::string extraData;
+    const char* extraPtr = nullptr;
+    for (int i = 0; i < received - 1; i++) {
+        if (buffer[i] == '\0') {
+            extraPtr = buffer + i + 1;
+            break;
+        }
+    }
+
+    if (extraPtr && *extraPtr != '\0') {
+        // Standard IPMsg format: extra data after \0
+        extraData = std::string(extraPtr);
+        WriteTransferLog("Extra data from \\0 separator: " + extraData);
+    } else {
+        // FeiQ format: no \0 separator, extra data is the body itself
+        // body already contains "packetNo(hex):fileId(hex):offset(hex):"
+        extraData = body;
+        WriteTransferLog("Extra data from body (no \\0 separator): " + extraData);
+    }
+
+    if (extraData.empty()) {
+        WriteTransferLog("No extra data in request, closing connection");
+        closesocket(clientSocket);
+        return;
+    }
+
+    // Parse extra: "packetNo(hex):fileId(hex):offset(hex):"
+    WriteTransferLog("Parsing extra data: " + extraData);
+    std::istringstream extraIss(extraData);
+    std::string reqPktNoStr, fileIdStr, offsetStr;
+
+    uint64_t reqPacketNo = 0;
+    int fileId = 0;
+    int64_t offset = 0;
+
+    if (std::getline(extraIss, reqPktNoStr, ':')) {
+        try { reqPacketNo = std::stoull(reqPktNoStr, nullptr, 16); } catch (...) {}
+    }
+    if (std::getline(extraIss, fileIdStr, ':')) {
+        try { fileId = std::stoi(fileIdStr, nullptr, 16); } catch (...) {}
+    }
+    if (std::getline(extraIss, offsetStr, ':')) {
+        try { offset = std::stoll(offsetStr, nullptr, 16); } catch (...) {}
+    }
+
+    WriteTransferLog("GETFILEDATA parsed: reqPacketNo=" + std::to_string(reqPacketNo) + 
+                     " (0x" + reqPktNoStr + "), fileId=" + std::to_string(fileId) + 
+                     " (0x" + fileIdStr + "), offset=" + std::to_string(offset));
+
+    // Debug: print all registered file infos for matching
+    {
+        std::lock_guard<std::mutex> lock(fileInfoMutex_);
+        for (const auto& [tid, fi] : fileInfoRegistry_) {
+            WriteTransferLog("  Registered: transferId=" + tid + 
+                         ", packetNo=" + std::to_string(fi.packetNo) +
+                         ", fileId=" + std::to_string(fi.fileId));
+        }
+    }
+
+    // Find file info by matching both packetNo and fileId (reference: Feiq onTcpClientConnected)
+    // The GETFILEDATA request's extra field contains the original SENDMSG's packetNo and fileId
+    std::string filePath;
+    std::string matchedTransferId;
+    int64_t fileSize = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(fileInfoMutex_);
+        for (const auto& [transferId, fileInfo] : fileInfoRegistry_) {
+            // Match both packetNo (from original SENDMSG) and fileId
+            if (fileInfo.packetNo == reqPacketNo && fileInfo.fileId == fileId) {
+                WriteTransferLog("Match found: transferId=" + transferId +
+                                 ", packetNo=" + std::to_string(fileInfo.packetNo) +
+                                 ", fileId=" + std::to_string(fileInfo.fileId));
+                // Find the transfer
+                std::lock_guard<std::mutex> tlock(transfersMutex_);
+                auto it = transfers_.find(transferId);
+                if (it != transfers_.end()) {
+                    WriteTransferLog("Transfer found: isSending=" + std::to_string(it->second.isSending) +
+                                     ", localPath=" + it->second.localPath);
+                    if (it->second.isSending) {
+                        filePath = it->second.localPath;
+                        fileSize = fileInfo.fileSize;
+                        matchedTransferId = transferId;
+                        break;
+                    }
+                } else {
+                    WriteTransferLog("Transfer NOT found in transfers_ map!");
+                }
+            }
+        }
+    }
+
+    // Strict matching: only match by packetNo+fileId, no fallback
+    // Fallback by fileId alone is dangerous since fileId=0 for all files
+
+    WriteTransferLog("File path resolved: '" + filePath + "', matchedTransferId=" + matchedTransferId +
+                     ", exists=" + (filePath.empty() ? "N/A(empty)" : (fs::exists(filePath) ? "yes" : "NO")));
+
+    if (filePath.empty() || !fs::exists(filePath)) {
+        WriteTransferLog("File NOT found for GETFILEDATA! reqPacketNo=" + std::to_string(reqPacketNo) +
+                         ", fileId=" + std::to_string(fileId) + ", filePath='" + filePath + "'");
+        closesocket(clientSocket);
+        return;
+    }
+
+    WriteTransferLog("Using matchedTransferId=" + matchedTransferId + " for SendFileThread");
+
+    SendFileThread(matchedTransferId, clientSocket, filePath, fileSize, offset);
+}
+
+std::string FileTransferManager::StartSendFile(const std::string& targetIp, int targetPort,
+                                                const std::string& filePath,
+                                                const std::string& toUser) {
+    if (!ready_) return "";
+
+    // Check if file exists
+    if (!fs::exists(filePath)) {
+        MsgLog("[FileTransfer] File not found: " + filePath);
+        return "";
+    }
+
+    // Generate transfer ID
+    std::string transferId = GenerateTransferId();
+
+    // Get file info
+    fs::path path(filePath);
+    std::string fileName = path.filename().string();
+
+    // Strip timestamp prefix from temp filename (format: "{timestamp}_{original_name}")
+    // The temp file is created by HandleFileSaveTemp with a timestamp prefix
+    {
+        size_t underscorePos = fileName.find('_');
+        if (underscorePos != std::string::npos && underscorePos > 0) {
+            std::string prefix = fileName.substr(0, underscorePos);
+            bool isAllDigits = !prefix.empty() && std::all_of(prefix.begin(), prefix.end(), ::isdigit);
+            if (isAllDigits && prefix.length() >= 9) {
+                // Looks like a Unix timestamp prefix, strip it
+                fileName = fileName.substr(underscorePos + 1);
+            }
+        }
+    }
+
+    int64_t fileSize = fs::file_size(filePath);
+
+    // Create transfer record
+    TransferProgress transfer;
+    transfer.transferId = transferId;
+    transfer.filename = fileName;
+    transfer.fileSize = fileSize;
+    transfer.transferred = 0;
+    transfer.status = TransferStatus::Pending;
+    transfer.fromUser = "local";
+    transfer.toUser = toUser;
+    transfer.localPath = filePath;
+    transfer.isSending = true;
+
+    {
+        std::lock_guard<std::mutex> lock(transfersMutex_);
+        transfers_[transferId] = transfer;
+    }
+
+    // Register file info - use packetNo as fileId (matching IPMsg protocol)
+    FileInfo fileInfo;
+    fileInfo.fileId = 0;  // IPMsg file serial number starts from 0
+    fileInfo.fileName = fileName;
+    fileInfo.fileSize = fileSize;
+    // Use Unix time_t (seconds since epoch) as mtime, matching FeiQ/IPMsg format
+    fileInfo.modifyTime = static_cast<int64_t>(std::time(nullptr));
+    fileInfo.fileAttr = 1;  // IPMSG_FILE_REGULAR
+
+    {
+        std::lock_guard<std::mutex> lock(fileInfoMutex_);
+        fileInfoRegistry_[transferId] = fileInfo;
+    }
+
+    MsgLog("[FileTransfer] Started sending file: " + fileName +
+           " (" + std::to_string(fileSize) + " bytes) to " + toUser);
+
+    return transferId;
+}
+
+void FileTransferManager::SendFileThread(const std::string& transferId, SOCKET clientSocket,
+                                          const std::string& filePath, int64_t fileSize,
+                                          int64_t offset) {
+    WriteTransferLog("SendFileThread started: transferId=" + transferId + 
+                     ", filePath=" + filePath + ", fileSize=" + std::to_string(fileSize) +
+                     ", offset=" + std::to_string(offset));
+
+    // Update status to transferring
+    UpdateTransferProgress(transferId, 0, TransferStatus::Transferring);
+
+    // Open file
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) {
+        WriteTransferLog("Failed to open file: " + filePath);
+        UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
+        closesocket(clientSocket);
+        return;
+    }
+    WriteTransferLog("File opened successfully: " + filePath);
+
+    // Seek to offset if needed
+    if (offset > 0) {
+        file.seekg(offset, std::ios::beg);
+    }
+
+    const int bufferSize = 64 * 1024; // 64KB buffer
+    std::vector<char> buffer(bufferSize);
+    int64_t totalSent = offset;
+
+    while (totalSent < fileSize) {
+        // Check if cancelled
+        {
+            std::lock_guard<std::mutex> lock(transfersMutex_);
+            auto it = transfers_.find(transferId);
+            if (it != transfers_.end() && it->second.status == TransferStatus::Cancelled) {
+                MsgLog("[FileTransfer] Transfer cancelled: " + transferId);
+                break;
+            }
+        }
+
+        // Read from file
+        file.read(buffer.data(), bufferSize);
+        std::streamsize bytesRead = file.gcount();
+
+        if (bytesRead <= 0) {
+            break;
+        }
+
+        // Send data
+        int sent = send(clientSocket, buffer.data(), static_cast<int>(bytesRead), 0);
+        if (sent == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            WriteTransferLog("Send failed with error: " + std::to_string(err));
+            UpdateTransferProgress(transferId, totalSent, TransferStatus::Failed);
+            closesocket(clientSocket);
+            return;
+        }
+
+        totalSent += sent;
+
+        // Update progress
+        UpdateTransferProgress(transferId, totalSent, TransferStatus::Transferring);
+
+        // Log progress every 1MB
+        if (totalSent % (1024 * 1024) < bufferSize) {
+            WriteTransferLog("Sent " + std::to_string(totalSent) + "/" + std::to_string(fileSize) +
+                             " bytes (" + std::to_string(totalSent * 100 / fileSize) + "%)");
+        }
+    }
+
+    closesocket(clientSocket);
+
+    // Update final status
+    if (totalSent >= fileSize) {
+        UpdateTransferProgress(transferId, totalSent, TransferStatus::Completed);
+        WriteTransferLog("File sent successfully: " + filePath + " (" + std::to_string(totalSent) + " bytes)");
+    } else {
+        UpdateTransferProgress(transferId, totalSent, TransferStatus::Failed);
+        WriteTransferLog("File send incomplete: " + filePath + " (" + std::to_string(totalSent) + "/" + std::to_string(fileSize) + " bytes)");
+    }
+}
+
+std::string FileTransferManager::StartRecvFile(const std::string& fromUserIp, int fromUserPort,
+                                                const std::string& fileName, int64_t fileSize,
+                                                const std::string& savePath,
+                                                const std::string& fromUser,
+                                                uint64_t origPacketNo, int origFileId) {
+    WriteTransferLog("StartRecvFile called: fromUserIp=" + fromUserIp + ", fromUserPort=" + std::to_string(fromUserPort) + ", fileName=" + fileName + ", ready_=" + std::to_string(ready_));
+    
+    if (!ready_) {
+        WriteTransferLog("StartRecvFile failed: ready_ is false!");
+        return "";
+    }
+
+    // Generate transfer ID
+    std::string transferId = GenerateTransferId();
+    WriteTransferLog("Generated transferId: " + transferId);
+
+    // Create transfer record
+    TransferProgress transfer;
+    transfer.transferId = transferId;
+    transfer.filename = fileName;
+    transfer.fileSize = fileSize;
+    transfer.transferred = 0;
+    transfer.status = TransferStatus::Pending;
+    transfer.fromUser = fromUser;
+    transfer.toUser = "local";
+    transfer.localPath = savePath;  // For received files, localPath is where the file is saved
+    transfer.isSending = false;
+
+    {
+        std::lock_guard<std::mutex> lock(transfersMutex_);
+        transfers_[transferId] = transfer;
+    }
+    WriteTransferLog("Transfer record saved to map");
+
+    // Start receive thread, passing original packetNo and fileId for GETFILEDATA request
+    WriteTransferLog("Starting receive thread...");
+    try {
+        std::thread([this, transferId, fromUserIp, fromUserPort, savePath, fileSize,
+                     origPacketNo, origFileId]() {
+            RecvFileThread(transferId, fromUserIp, fromUserPort, savePath, fileSize,
+                           origPacketNo, origFileId);
+        }).detach();
+        WriteTransferLog("Receive thread started successfully");
+    } catch (const std::exception& e) {
+        WriteTransferLog("Failed to start receive thread: " + std::string(e.what()));
+        return "";
+    }
+
+    MsgLog("[FileTransfer] Started receiving file: " + fileName + " from " + fromUser);
+
+    return transferId;
+}
+
+void FileTransferManager::RecvFileThread(const std::string& transferId, const std::string& fromIp,
+                                          int fromPort, const std::string& savePath, int64_t fileSize,
+                                          uint64_t origPacketNo, int origFileId) {
+    WriteTransferLog("RecvFileThread started: transferId=" + transferId + ", fromIp=" + fromIp + ", fromPort=" + std::to_string(fromPort) + ", savePath=" + savePath + ", fileSize=" + std::to_string(fileSize) + ", origPacketNo=" + std::to_string(origPacketNo) + ", origFileId=" + std::to_string(origFileId));
+
+    // Update status to transferring
+    UpdateTransferProgress(transferId, 0, TransferStatus::Transferring);
+
+    // Create directory if not exists
+    fs::path path(savePath);
+    fs::create_directories(path.parent_path());
+
+    // Open file for writing
+    std::ofstream file(savePath, std::ios::binary);
+    if (!file.is_open()) {
+        WriteTransferLog("Failed to create file: " + savePath);
+        UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
+        return;
+    }
+    WriteTransferLog("File created: " + savePath);
+
+    // Connect to sender's TCP server (same port as UDP per IPMsg protocol)
+    WriteTransferLog("Creating TCP socket...");
+    SOCKET sendSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sendSocket == INVALID_SOCKET) {
+        WriteTransferLog("Failed to create socket");
+        UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
+        return;
+    }
+    WriteTransferLog("Socket created successfully");
+
+    sockaddr_in serverAddr = {};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(static_cast<u_short>(fromPort));
+    inet_pton(AF_INET, fromIp.c_str(), &serverAddr.sin_addr);
+
+    WriteTransferLog("Connecting to " + fromIp + ":" + std::to_string(fromPort) + "...");
+    if (connect(sendSocket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        WriteTransferLog("Failed to connect to sender " + fromIp + ":" + std::to_string(fromPort) + " (err=" + std::to_string(err) + ")");
+        closesocket(sendSocket);
+        UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
+        return;
+    }
+    WriteTransferLog("Connected to " + fromIp + ":" + std::to_string(fromPort));
+
+    // Get local user info for the protocol header
+    char localUserName[256] = {};
+    char localHostName[256] = {};
+    DWORD size;
+    size = sizeof(localUserName);
+    ::GetUserNameA(localUserName, &size);
+    size = sizeof(localHostName);
+    GetComputerNameA(localHostName, &size);
+
+    // Generate a new packetNo for this GETFILEDATA request itself
+    uint32_t newPktNo = static_cast<uint32_t>(
+        std::chrono::system_clock::now().time_since_epoch().count() & 0xFFFFFFFF);
+
+    // First, send RECVMSG via UDP to tell the sender we accept the file transfer
+    // FeiQ expects RECVMSG (with decimal packetNo in body) before it will accept TCP GETFILEDATA
+    WriteTransferLog("Sending RECVMSG to accept file transfer...");
+    {
+        SOCKET udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (udpSocket != INVALID_SOCKET) {
+            // RECVMSG body must be the original SENDMSG's packetNo in DECIMAL
+            // IMPORTANT: Use std::dec explicitly and use a fresh ostringstream to avoid hex contamination
+            std::ostringstream ackMsg;
+            ackMsg << std::dec << IPMSG_VERSION << ":" << std::dec << newPktNo << ":"
+                   << localUserName << ":" << localHostName << ":"
+                   << IPMSG_RECVMSG << ":" << std::dec << origPacketNo;
+            
+            sockaddr_in destAddr = {};
+            destAddr.sin_family = AF_INET;
+            destAddr.sin_port = htons(static_cast<u_short>(fromPort));
+            inet_pton(AF_INET, fromIp.c_str(), &destAddr.sin_addr);
+            
+            std::string ackStr = ackMsg.str();
+            int sendResult = sendto(udpSocket, ackStr.c_str(), static_cast<int>(ackStr.size()), 0,
+                         reinterpret_cast<sockaddr*>(&destAddr), sizeof(destAddr));
+            closesocket(udpSocket);
+            WriteTransferLog("RECVMSG sent: " + ackStr + " (sendResult=" + std::to_string(sendResult) + ")");
+        }
+    }
+    // Wait for the sender to process RECVMSG and be ready for TCP
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Build IPMsg GETFILEDATA request
+    // FeiQ format: "ver:packetNo:userName:hostName:96:origPacketNo(hex):fileId(hex):offset(hex):"
+    // NOTE: FeiQ does NOT use \0 separator between header and extra!
+    // The extra data follows directly after the command field's colon separator.
+    std::ostringstream requestOs;
+    requestOs << IPMSG_VERSION << ":" << newPktNo << ":"
+              << localUserName << ":" << localHostName << ":"
+              << IPMSG_GETFILEDATA << ":"
+              << std::hex << origPacketNo << ":" << origFileId << ":0:";
+
+    std::string request = requestOs.str();
+
+    std::ostringstream hexCmd;
+    hexCmd << std::hex << IPMSG_GETFILEDATA;
+    WriteTransferLog("GETFILEDATA request format: ver=" + std::to_string(IPMSG_VERSION) + 
+                      ", newPktNo=" + std::to_string(newPktNo) +
+                      ", command=" + std::to_string(IPMSG_GETFILEDATA) + " (0x" + hexCmd.str() + ")" +
+                      ", extra=" + std::to_string(origPacketNo) + ":" + std::to_string(origFileId) + ":0");
+    
+    // Print raw bytes of the request for debugging
+    WriteTransferLog("=== GETFILEDATA REQUEST RAW BYTES ===");
+    WriteTransferLog("Request length: " + std::to_string(request.size()) + " bytes");
+    std::ostringstream rawHex;
+    std::ostringstream rawAscii;
+    for (size_t i = 0; i < request.size(); i++) {
+        rawHex << std::hex << std::setfill('0') << std::setw(2) << (unsigned int)(unsigned char)request[i] << " ";
+        if (request[i] >= 32 && request[i] <= 126) {
+            rawAscii << request[i];
+        } else if (request[i] == '\0') {
+            rawAscii << "\\0";
+        } else if (request[i] == '\n') {
+            rawAscii << "\\n";
+        } else {
+            rawAscii << ".";
+        }
+        if (i % 16 == 15) {
+            WriteTransferLog("0x" + std::to_string(i - 15) + ": " + rawHex.str() + " | " + rawAscii.str());
+            rawHex.str("");
+            rawAscii.str("");
+        }
+    }
+    if (!rawHex.str().empty()) {
+        WriteTransferLog("0x" + std::to_string(request.size() - (request.size() % 16)) + ": " + rawHex.str() + " | " + rawAscii.str());
+    }
+    WriteTransferLog("=== END REQUEST ===");
+
+    if (::send(sendSocket, request.data(), static_cast<int>(request.size()), 0) == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        WriteTransferLog("Failed to send GETFILEDATA request (err=" + std::to_string(err) + ")");
+        closesocket(sendSocket);
+        UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
+        return;
+    }
+    WriteTransferLog("GETFILEDATA request sent successfully");
+
+    // Set TCP_NODELAY to disable Nagle's algorithm (important for file transfer)
+    int nodelay = 1;
+    setsockopt(sendSocket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+    WriteTransferLog("TCP_NODELAY set");
+
+    // Receive file data
+    const int bufferSize = 64 * 1024; // 64KB buffer
+    std::vector<char> buffer(bufferSize);
+    int64_t totalReceived = 0;
+    int receiveTimeout = 5000; // 5 second timeout
+    setsockopt(sendSocket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&receiveTimeout), sizeof(receiveTimeout));
+
+    WriteTransferLog("Starting file data receive loop (timeout=" + std::to_string(receiveTimeout) + "ms)");
+
+    while (fileSize <= 0 || totalReceived < fileSize) {
+        {
+            std::lock_guard<std::mutex> lock(transfersMutex_);
+            auto it = transfers_.find(transferId);
+            if (it != transfers_.end() && it->second.status == TransferStatus::Cancelled) {
+                WriteTransferLog("Transfer cancelled");
+                break;
+            }
+        }
+
+        int recvSize = (fileSize > 0) ?
+            static_cast<int>((std::min)(static_cast<int64_t>(bufferSize), fileSize - totalReceived)) :
+            bufferSize;
+
+        int received = recv(sendSocket, buffer.data(), recvSize, 0);
+        if (received <= 0) {
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT) {
+                WriteTransferLog("recv() timed out after " + std::to_string(receiveTimeout) + "ms");
+            } else if (err == 0) {
+                WriteTransferLog("recv() returned 0 - connection closed by peer");
+            } else {
+                WriteTransferLog("recv() failed with error: " + std::to_string(err));
+            }
+            break;
+        }
+
+        file.write(buffer.data(), received);
+        totalReceived += received;
+
+        UpdateTransferProgress(transferId, totalReceived, TransferStatus::Transferring);
+
+        WriteTransferLog("Received " + std::to_string(totalReceived) + "/" + std::to_string(fileSize) +
+                          " bytes (" + std::to_string(fileSize > 0 ? totalReceived * 100 / fileSize : 0) + "%)");
+    }
+
+    closesocket(sendSocket);
+    file.close();
+
+    // Update final status
+    if (fileSize <= 0 || totalReceived >= fileSize) {
+        WriteTransferLog("File received successfully: " + savePath + " (" + std::to_string(totalReceived) + " bytes)");
+        UpdateTransferProgress(transferId, totalReceived, TransferStatus::Completed);
+    } else {
+        WriteTransferLog("File receive failed: " + savePath + " (received " + std::to_string(totalReceived) + "/" + std::to_string(fileSize) + " bytes)");
+        UpdateTransferProgress(transferId, totalReceived, TransferStatus::Failed);
+        fs::remove(savePath);
+    }
+}
+
+bool FileTransferManager::CancelTransfer(const std::string& transferId) {
+    std::lock_guard<std::mutex> lock(transfersMutex_);
+    auto it = transfers_.find(transferId);
+    if (it != transfers_.end()) {
+        it->second.status = TransferStatus::Cancelled;
+        MsgLog("[FileTransfer] Transfer cancelled: " + transferId);
+        return true;
+    }
+    return false;
+}
+
+std::vector<TransferProgress> FileTransferManager::GetActiveTransfers() const {
+    std::lock_guard<std::mutex> lock(transfersMutex_);
+    std::vector<TransferProgress> result;
+    for (const auto& [id, transfer] : transfers_) {
+        result.push_back(transfer);
+    }
+    return result;
+}
+
+std::optional<TransferProgress> FileTransferManager::GetTransfer(const std::string& transferId) const {
+    std::lock_guard<std::mutex> lock(transfersMutex_);
+    auto it = transfers_.find(transferId);
+    if (it != transfers_.end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
+void FileTransferManager::RegisterFileInfo(const std::string& transferId, const FileInfo& fileInfo) {
+    std::lock_guard<std::mutex> lock(fileInfoMutex_);
+    fileInfoRegistry_[transferId] = fileInfo;
+}
+
+std::optional<FileInfo> FileTransferManager::GetFileInfo(const std::string& transferId) const {
+    std::lock_guard<std::mutex> lock(fileInfoMutex_);
+    auto it = fileInfoRegistry_.find(transferId);
+    if (it != fileInfoRegistry_.end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
+void FileTransferManager::UpdateTransferProgress(const std::string& transferId, 
+                                                  int64_t transferred,
+                                                  TransferStatus status) {
+    std::lock_guard<std::mutex> lock(transfersMutex_);
+    auto it = transfers_.find(transferId);
+    if (it != transfers_.end()) {
+        it->second.transferred = transferred;
+        it->second.status = status;
+
+        // Call callback if set
+        if (onProgress_) {
+            onProgress_(it->second);
+        }
+    }
+}
+
+bool FileTransferManager::SendFileRequest(const std::string& targetIp, int targetPort,
+                                           const std::string& transferId, int fileId) {
+    // This is handled in RecvFileThread
+    return true;
+}
+
+std::string FileTransferManager::GenerateTransferId() {
+    auto now = std::chrono::system_clock::now().time_since_epoch().count();
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(100000, 999999);
+
+    std::ostringstream oss;
+    oss << std::hex << now << "_" << dis(gen);
+    return oss.str();
+}
+
+} // namespace ipmsg

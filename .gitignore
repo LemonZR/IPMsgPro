@@ -1,0 +1,66 @@
+# Build directories
+build/
+build-msvc/
+out/
+frontend/dist/
+
+# IDE
+.vs/
+.vscode/
+.mimocode/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+CMakeUserPresets.json
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Generated
+*.pdb
+*.ilk
+*.exp
+*.mod
+*.smod
+
+# Executables
+*.exe
+*.app
+
+# Prerequisites
+*.d
+
+# vcpkg
+vcpkg/
+vcpkg_installed/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# OS
+Thumbs.db
+Desktop.ini
+/frontend/dist
