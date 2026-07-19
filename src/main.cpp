@@ -785,11 +785,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         app.GetWindow().OnCreated([&](tauricpp::Window& win) {
             LOG_INFO("Window created, hwnd=" + std::to_string(reinterpret_cast<uintptr_t>(win.GetHwnd())));
             cmdHandler.SetNativeWindowHandle(win.GetHwnd());
+            cmdHandler.SetWindow(&win);
+
+            // Create tray icon (loads from exe resources automatically)
+            win.CreateTrayIcon("", "倍信");
+
+            // Tray left-click: show window
+            win.OnTrayClick([&]() {
+                win.Show();
+            });
+
+            // Tray context menu
+            win.SetTrayMenu({
+                {"显示主窗口", [&]() { win.Show(); }},
+                {"退出", [&]() { g_running = false; win.Close(); }}
+            });
         });
 
-        // Set window close handler
+        // Set window close handler - intercept based on minimizeBehavior setting
+        // minimizeBehavior: "taskbar" = minimize to taskbar, "tray" = hide to tray
         app.GetWindow().OnClose([&]() -> bool {
-            LOG_INFO("Window close requested");
+            // If g_running is already false, this is a real quit request (from tray menu)
+            if (!g_running) return true;
+
+            std::string behavior = cmdHandler.GetMinimizeBehavior();
+            LOG_INFO("Window close requested, behavior=" + behavior);
+            if (behavior == "tray") {
+                // Hide window to tray instead of closing
+                app.GetWindow().Hide();
+                return false;  // Block close, just hide
+            }
+            // Default: actually close the window
             g_running = false;
             return true;
         });

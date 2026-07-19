@@ -118,6 +118,12 @@ class ConfigDB {
     const dataDir = await this.get<string>('dataDir');
     if (dataDir) config.dataDir = dataDir;
 
+    const minimizeBehavior = await this.get<string>('minimizeBehavior');
+    if (minimizeBehavior === 'taskbar' || minimizeBehavior === 'tray') config.minimizeBehavior = minimizeBehavior;
+
+    const notificationSound = await this.get<boolean>('notificationSound');
+    if (notificationSound !== null) config.notificationSound = notificationSound;
+
     return config;
   }
 

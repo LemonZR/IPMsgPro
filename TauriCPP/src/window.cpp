@@ -7,8 +7,11 @@
 #include <wrl.h>
 #include <shlwapi.h>
 #include <shellscalingapi.h>
+#include <shellapi.h>
+#include <shlobj.h>
 #include <queue>
 #include <mutex>
+#include <vector>
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shcore.lib")   // 用于 GetDpiForMonitor / SetProcessDpiAwarenessContext
@@ -66,6 +69,9 @@ Window::Window(const Config& config) : config_(config) {}
 
 Window::~Window() {
     shutting_down_ = true;
+
+    // Remove tray icon
+    RemoveTrayIcon();
 
     // 清理JS队列
     {
@@ -272,6 +278,25 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         return 0;
 
+    case WM_TAURICPP_TRAY:
+        if (self) {
+            self->ProcessTrayMessage(wParam, lParam);
+        }
+        return 0;
+
+    case WM_TIMER:
+        if (self && wParam == TRAY_FLASH_TIMER_ID && self->trayFlashing_) {
+            self->flashShowIcon_ = !self->flashShowIcon_;
+            NOTIFYICONDATAW nid = {};
+            nid.cbSize = sizeof(NOTIFYICONDATAW);
+            nid.hWnd = self->hwnd_;
+            nid.uID = self->trayIconData_.uID;
+            nid.uFlags = NIF_ICON;
+            nid.hIcon = self->flashShowIcon_ ? self->trayOriginalIcon_ : self->trayBlankIcon_;
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+        return 0;
+
     case WM_CLOSE:
         if (self && self->on_close_) {
             if (!self->on_close_()) {
@@ -284,6 +309,7 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_DESTROY:
         if (self) {
             self->shutting_down_ = true;
+            self->RemoveTrayIcon();
         }
         PostQuitMessage(0);
         return 0;
@@ -779,8 +805,25 @@ void Window::Restore() {
     if (hwnd_) ShowWindow(hwnd_, SW_RESTORE);
 }
 
+void Window::Hide() {
+    if (hwnd_) ShowWindow(hwnd_, SW_HIDE);
+}
+
+void Window::Show() {
+    StopTrayFlash();
+    if (hwnd_) {
+        ShowWindow(hwnd_, SW_SHOW);
+        if (IsMinimized()) Restore();
+        SetForegroundWindow(hwnd_);
+    }
+}
+
 bool Window::IsMinimized() const {
     return hwnd_ ? IsIconic(hwnd_) : false;
+}
+
+bool Window::IsVisible() const {
+    return hwnd_ ? IsWindowVisible(hwnd_) : false;
 }
 
 bool Window::IsMaximized() const {
@@ -880,6 +923,198 @@ void Window::ProcessAsyncInvokeQueue() {
 void Window::Close() {
     if (hwnd_) {
         PostMessage(hwnd_, WM_CLOSE, 0, 0);
+    }
+}
+
+// ============================================================================
+// 系统托盘
+// ============================================================================
+void Window::CreateTrayIcon(const std::string& iconPath, const std::string& tooltip) {
+    if (trayIconCreated_) return;
+
+    // Load icon: try exe resource first, then file path, then default
+    HICON hIcon = nullptr;
+    hIcon = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(1));
+    if (!hIcon && !iconPath.empty()) {
+        hIcon = (HICON)LoadImageW(nullptr, Utf8ToWide(iconPath).c_str(),
+            IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+    }
+    if (!hIcon) {
+        hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    }
+
+    // Save original icon for flashing
+    trayOriginalIcon_ = hIcon;
+
+    // Create a fully transparent blank icon for flashing "off" state
+    // Using CreateDIBSection with 32-bit ARGB (alpha=0 = fully transparent)
+    {
+        int cx = GetSystemMetrics(SM_CXSMICON);
+        int cy = GetSystemMetrics(SM_CYSMICON);
+        BITMAPV5HEADER bmi = {};
+        bmi.bV5Size = sizeof(BITMAPV5HEADER);
+        bmi.bV5Width = cx;
+        bmi.bV5Height = cy;
+        bmi.bV5Planes = 1;
+        bmi.bV5BitCount = 32;
+        bmi.bV5Compression = BI_BITFIELDS;
+        bmi.bV5RedMask = 0x00FF0000;
+        bmi.bV5GreenMask = 0x0000FF00;
+        bmi.bV5BlueMask = 0x000000FF;
+        bmi.bV5AlphaMask = 0xFF000000;
+        void* colorBits = nullptr;
+        HBITMAP hColorBmp = CreateDIBSection(nullptr, (BITMAPINFO*)&bmi,
+            DIB_RGB_COLORS, &colorBits, nullptr, 0);
+        // colorBits is zero-initialized by CreateDIBSection → all pixels alpha=0 (transparent)
+
+        // AND mask: all bits = 1 (fully transparent)
+        // Monochrome bitmap rows are padded to 4-byte boundaries
+        int maskRowBytes = ((cx + 31) / 32) * 4;
+        std::vector<BYTE> maskBuf(maskRowBytes * cy, 0xFF);
+        HBITMAP hMaskBmp = CreateBitmap(cx, cy, 1, 1, maskBuf.data());
+
+        ICONINFO ii = {};
+        ii.fIcon = TRUE;
+        ii.hbmMask = hMaskBmp;
+        ii.hbmColor = hColorBmp;
+        trayBlankIcon_ = CreateIconIndirect(&ii);
+
+        DeleteObject(hColorBmp);
+        DeleteObject(hMaskBmp);
+    }
+
+    trayIconData_.cbSize = sizeof(NOTIFYICONDATAW);
+    trayIconData_.hWnd = hwnd_;
+    trayIconData_.uID = 1;
+    trayIconData_.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    trayIconData_.uCallbackMessage = WM_TAURICPP_TRAY;
+    trayIconData_.hIcon = hIcon;
+    trayOriginalTooltip_ = tooltip.empty() ? config_.title : tooltip;
+    std::wstring wTip = Utf8ToWide(trayOriginalTooltip_);
+    wcsncpy(trayIconData_.szTip, wTip.c_str(), sizeof(trayIconData_.szTip) / sizeof(WCHAR) - 1);
+
+    if (!Shell_NotifyIconW(NIM_ADD, &trayIconData_)) {
+        OutputDebugStringA("[TRAY] Shell_NotifyIconW NIM_ADD failed\n");
+        return;
+    }
+
+    trayIconData_.uVersion = NOTIFYICON_VERSION_4;
+    if (!Shell_NotifyIconW(NIM_SETVERSION, &trayIconData_)) {
+        OutputDebugStringA("[TRAY] Shell_NotifyIconW NIM_SETVERSION failed, using default version\n");
+        trayIconData_.uVersion = 0;
+    }
+
+    trayIconCreated_ = true;
+}
+
+void Window::RemoveTrayIcon() {
+    StopTrayFlash();
+    if (trayIconCreated_) {
+        Shell_NotifyIconW(NIM_DELETE, &trayIconData_);
+        trayIconCreated_ = false;
+    }
+    trayOriginalIcon_ = nullptr;
+    if (trayBlankIcon_) {
+        DestroyIcon(trayBlankIcon_);
+        trayBlankIcon_ = nullptr;
+    }
+    if (trayMenu_) {
+        DestroyMenu(trayMenu_);
+        trayMenu_ = nullptr;
+    }
+}
+
+void Window::SetTrayTooltip(const std::string& tooltip) {
+    if (!trayIconCreated_) return;
+    std::wstring wTip = Utf8ToWide(tooltip);
+    wcsncpy(trayIconData_.szTip, wTip.c_str(), sizeof(trayIconData_.szTip) / sizeof(WCHAR) - 1);
+    trayIconData_.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &trayIconData_);
+    trayIconData_.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+}
+
+void Window::ShowTrayNotification(const std::string& title, const std::string& message) {
+    // Start tray icon flashing (like WeChat: icon alternates between visible and invisible)
+    StartTrayFlash();
+}
+
+void Window::StartTrayFlash() {
+    if (!trayIconCreated_ || !hwnd_ || trayFlashing_) return;
+
+    trayFlashing_ = true;
+    flashShowIcon_ = true;
+    // SetTimer sends WM_TIMER messages, wParam = timer ID
+    SetTimer(hwnd_, TRAY_FLASH_TIMER_ID, 500, nullptr);
+}
+
+void Window::StopTrayFlash() {
+    if (!trayFlashing_) return;
+
+    trayFlashing_ = false;
+    flashShowIcon_ = true;
+    if (hwnd_) {
+        KillTimer(hwnd_, TRAY_FLASH_TIMER_ID);
+    }
+
+    // Restore original icon
+    if (trayIconCreated_) {
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(NOTIFYICONDATAW);
+        nid.hWnd = hwnd_;
+        nid.uID = trayIconData_.uID;
+        nid.uFlags = NIF_ICON;
+        nid.hIcon = trayOriginalIcon_;
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+
+    // Restore original tooltip
+    if (!trayOriginalTooltip_.empty()) {
+        std::wstring wTip = Utf8ToWide(trayOriginalTooltip_);
+        wcsncpy(trayIconData_.szTip, wTip.c_str(), sizeof(trayIconData_.szTip) / sizeof(WCHAR) - 1);
+        trayIconData_.szTip[sizeof(trayIconData_.szTip) / sizeof(WCHAR) - 1] = L'\0';
+        trayIconData_.uFlags = NIF_TIP;
+        Shell_NotifyIconW(NIM_MODIFY, &trayIconData_);
+        trayIconData_.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    }
+}
+
+void Window::SetTrayMenu(const std::vector<std::pair<std::string, std::function<void()>>>& items) {
+    trayMenuItems_ = items;
+    // Recreate menu on demand in ProcessTrayMessage
+}
+
+void Window::ProcessTrayMessage(WPARAM wParam, LPARAM lParam) {
+    UINT event = LOWORD(lParam);
+
+    switch (event) {
+    case WM_LBUTTONUP:
+        StopTrayFlash();
+        if (on_tray_click_) {
+            on_tray_click_();
+        }
+        break;
+
+    case WM_RBUTTONUP:
+        // Right click - show context menu
+        if (!trayMenuItems_.empty()) {
+            if (trayMenu_) DestroyMenu(trayMenu_);
+            trayMenu_ = CreatePopupMenu();
+            for (size_t i = 0; i < trayMenuItems_.size(); i++) {
+                AppendMenuW(trayMenu_, MF_STRING, static_cast<UINT_PTR>(i + 1),
+                    Utf8ToWide(trayMenuItems_[i].first).c_str());
+            }
+            // Show menu at cursor position
+            POINT pt;
+            GetCursorPos(&pt);
+            SetForegroundWindow(hwnd_);
+            UINT cmd = TrackPopupMenu(trayMenu_, TPM_RIGHTALIGN | TPM_NONOTIFY | TPM_RETURNCMD,
+                pt.x, pt.y, 0, hwnd_, nullptr);
+            if (cmd > 0 && cmd <= trayMenuItems_.size()) {
+                trayMenuItems_[cmd - 1].second();
+            }
+            PostMessage(hwnd_, WM_NULL, 0, 0);  // Required after TrackPopupMenu
+        }
+        break;
     }
 }
 

@@ -50,7 +50,12 @@ export interface Config {
   port: number;
   autoDiscovery: boolean;
   dataDir: string;      // chat history & data directory (debug dir follows this)
+  minimizeBehavior: 'taskbar' | 'tray';  // minimize to taskbar or system tray
+  notificationSound: boolean;  // play notification sound on new messages
 }
+
+/** Application version */
+export const APP_VERSION = '1.1.0';
 
 /** File transfer type */
 export interface FileTransfer {
@@ -122,4 +127,6 @@ export const DEFAULT_CONFIG: Config = {
   port: 2425,
   autoDiscovery: true,
   dataDir: '',
+  minimizeBehavior: 'taskbar',
+  notificationSound: true,
 };

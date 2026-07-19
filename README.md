@@ -1,4 +1,4 @@
-# 倍信 (IPMsg Pro)
+# 倍信 (IPMsg Pro) v1.1.0
 
 基于 [TauriCPP](https://github.com/masonwu21/TauriCPP) 框架和 [ipmsg-master](https://ipmsg.org/) 协议实现的局域网即时通讯应用，兼容飞秋和IPMsg v3.0 协议（UDP 2425 端口）。
 
@@ -10,6 +10,7 @@
 - **文件传输** — 发送/接收文件确认流程，传输进度实时显示
 - **类微信界面** — 三栏布局：左侧会话列表、中间用户列表、右侧聊天面板
 - **数据持久化** — SQLite 存储消息历史，配置信息本地保存
+- **新消息提示音** — 收到新文字消息或文件接收请求时播放提示音，可在「设置」中开关（提示音已作为资源嵌入 exe，运行时自动提取播放）
 
 ## 技术栈
 
@@ -38,7 +39,7 @@ IPMsgPro/
 │       ├── services/      # 后端桥接服务
 │       └── types/         # TypeScript 类型定义
 ├── TauriCPP/              # TauriCPP 框架（子模块）
-├── resources/             # 应用图标等资源
+├── resources/             # 应用图标、通知提示音(embedded)等资源
 └── CMakeLists.txt         # CMake 构建配置
 ```
 

@@ -54,6 +54,20 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
         }
       }
 
+      // Apply saved minimizeBehavior to backend
+      try {
+        await invoke('config.set', { minimizeBehavior: config.minimizeBehavior });
+      } catch (e) {
+        console.error('[ConfigStore] Failed to set minimizeBehavior on backend:', e);
+      }
+
+      // Apply saved notificationSound to backend
+      try {
+        await invoke('config.set', { notificationSound: config.notificationSound });
+      } catch (e) {
+        console.error('[ConfigStore] Failed to set notificationSound on backend:', e);
+      }
+
     } catch (err) {
       console.error('[ConfigStore] Failed to load config:', err);
       set({ loaded: true });
@@ -81,6 +95,20 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       if (dataDir !== undefined) {
         console.log('[ConfigStore] Notifying backend of dataDir change:', dataDir);
         await invoke('config.set', { dataDir });
+      }
+
+      // Notify backend of minimizeBehavior changes
+      const minimizeBehavior = partial.minimizeBehavior;
+      if (minimizeBehavior !== undefined) {
+        console.log('[ConfigStore] Notifying backend of minimizeBehavior change:', minimizeBehavior);
+        await invoke('config.set', { minimizeBehavior });
+      }
+
+      // Notify backend of notificationSound changes
+      const notificationSound = partial.notificationSound;
+      if (notificationSound !== undefined) {
+        console.log('[ConfigStore] Notifying backend of notificationSound change:', notificationSound);
+        await invoke('config.set', { notificationSound });
       }
     } catch (err) {
       console.error('[ConfigStore] Failed to save config:', err);

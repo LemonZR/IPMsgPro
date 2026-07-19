@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { FiX, FiPlus, FiTrash2, FiFolder, FiRotateCcw } from 'react-icons/fi';
+import { FiX, FiPlus, FiTrash2, FiFolder, FiRotateCcw, FiMonitor, FiMinimize2, FiVolume2, FiVolumeX } from 'react-icons/fi';
 import { useConfigStore } from '../stores/configStore';
-import { Config, DEFAULT_CONFIG } from '../types';
+import { Config, DEFAULT_CONFIG, APP_VERSION } from '../types';
 import { invoke } from '../services/bridge';
 
 interface SettingsProps {
@@ -183,6 +183,69 @@ export default function Settings({ onClose }: SettingsProps) {
                 <p className="text-xs text-gray-400 mt-1">默认: {displayDataDir}</p>
               )}
             </Field>
+          </Section>
+
+          {/* Notification sound */}
+          <Section title="消息提示">
+            <Field label="新消息提示音">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={localConfig.notificationSound}
+                  onChange={(e) => setLocalConfig({ ...localConfig, notificationSound: e.target.checked })}
+                  className="w-4 h-4 text-primary-500 rounded"
+                />
+                <span className="text-sm text-gray-600">
+                  {localConfig.notificationSound ? <FiVolume2 size={14} className="inline mr-1" /> : <FiVolumeX size={14} className="inline mr-1" />}
+                  收到新消息时播放提示音
+                </span>
+              </label>
+            </Field>
+          </Section>
+
+          {/* Window behavior */}
+          <Section title="窗口行为">
+            <Field label="关闭/最小化行为">
+              <div className="flex gap-3">
+                <button
+                  className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded border transition-colors ${
+                    localConfig.minimizeBehavior === 'taskbar'
+                      ? 'border-primary-500 bg-primary-50 text-primary-600'
+                      : 'border-gray-200 text-gray-500 hover:border-primary-300'
+                  }`}
+                  onClick={() => setLocalConfig({ ...localConfig, minimizeBehavior: 'taskbar' })}
+                >
+                  <FiMinimize2 size={14} />
+                  最小化到任务栏
+                </button>
+                <button
+                  className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded border transition-colors ${
+                    localConfig.minimizeBehavior === 'tray'
+                      ? 'border-primary-500 bg-primary-50 text-primary-600'
+                      : 'border-gray-200 text-gray-500 hover:border-primary-300'
+                  }`}
+                  onClick={() => setLocalConfig({ ...localConfig, minimizeBehavior: 'tray' })}
+                >
+                  <FiMonitor size={14} />
+                  最小化到系统托盘
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                {localConfig.minimizeBehavior === 'tray'
+                  ? '关闭窗口时隐藏到系统托盘，右键托盘图标可退出'
+                  : '关闭窗口时退出程序'}
+              </p>
+            </Field>
+          </Section>
+
+          {/* Version info */}
+          <Section title="关于">
+            <div className="text-sm text-gray-500">
+              倍信 (IPMsg Pro) v{APP_VERSION}
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              兼容飞秋和IPMsg v3.0协议的局域网即时通讯
+            </p>
           </Section>
         </div>
       </div>

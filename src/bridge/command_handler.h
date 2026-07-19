@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include <tauricpp/bridge.hpp>
+#include <tauricpp/window.hpp>
 #include "ipmsg/msgmng.h"
 #include "database/message_db.h"
 #include "file/file_transfer.h"
@@ -26,6 +27,15 @@ public:
 
     /// Set main window handle (call after window is created)
     void SetNativeWindowHandle(void* hwnd);
+
+    /// Set window reference for window operations (show/hide/close)
+    void SetWindow(tauricpp::Window* window);
+
+    /// Get the minimize behavior setting
+    std::string GetMinimizeBehavior() const { return minimizeBehavior_; }
+
+    /// Get the notification sound setting
+    bool GetNotificationSound() const { return notificationSound_; }
 
     /// Register all Bridge commands
     void RegisterAllCommands();
@@ -82,8 +92,11 @@ private:
     MsgMng* msgMng_ = nullptr;
     MessageDB* msgDb_ = nullptr;
     FileTransferManager* fileTransfer_ = nullptr;
+    tauricpp::Window* window_ = nullptr;  // Window reference for show/hide/close
     void* hwnd_ = nullptr;  // Main window handle for dialogs (cast to HWND in cpp)
     std::string dataDir_;   // Custom data directory (empty = use default)
+    std::string minimizeBehavior_ = "taskbar";  // "taskbar" or "tray"
+    bool notificationSound_ = true;  // play notification sound on new messages
 };
 
 } // namespace ipmsg

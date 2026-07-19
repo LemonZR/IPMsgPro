@@ -1,2 +1,39 @@
 // Application icon resource
 1 ICON "icon.ico"
+
+#include "resource.h"
+
+// Notification sound (MP3) embedded as binary resource
+IDR_NOTIFICATION_MP3 RCDATA "notification.mp3"
+
+// Version information
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,1,0,0
+PRODUCTVERSION  1,1,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",     "masonwu21"
+            VALUE "FileDescription", "倍信 (IPMsg Pro) - 局域网即时通讯"
+            VALUE "FileVersion",     "1.1.0"
+            VALUE "InternalName",    "IPMsgPro"
+            VALUE "LegalCopyright",  "MIT License \xa9 2026 masonwu21"
+            VALUE "OriginalFilename","IPMsgPro.exe"
+            VALUE "ProductName",     "倍信 (IPMsg Pro)"
+            VALUE "ProductVersion",  "1.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

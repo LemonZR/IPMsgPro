@@ -106,6 +106,8 @@ declare global {
     __tauricpp__?: {
       invoke: (cmd: string, args: Record<string, any>) => Promise<any>;
       listen: (event: string, callback: (data: any) => void) => () => void;
+      homeDir?: string;
+      defaultDataDir?: string;
     };
   }
 }

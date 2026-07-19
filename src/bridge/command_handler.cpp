@@ -2,8 +2,19 @@
 // Bridge Command Handler Implementation
 // ============================================================================
 
+// Prevent windows.h from including winsock.h (which conflicts with winsock2.h)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <shellapi.h>
+#include <mmsystem.h>
+
 #include "command_handler.h"
 #include "ipmsg/protocol.h"
+#include "../resources/resource.h"
 #include <ctime>
 #include <random>
 #include <sstream>
@@ -11,6 +22,7 @@
 #include <iomanip>
 #include <tauricpp/dialog.hpp>
 #include <shlobj.h>
+#include <thread>
 
 // ============================================================================
 // Utility: Convert GBK to UTF-8 on Windows
@@ -69,10 +81,7 @@ static std::string EnsureUtf8(const std::string& str) {
 #include <iostream>
 #include <chrono>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <shellapi.h>
-#endif
+// windows.h, shellapi.h, winsock2.h already included at top (with WIN32_LEAN_AND_MEAN)
 
 namespace ipmsg {
 
@@ -99,6 +108,74 @@ namespace {
             log << "[" << buf << "] " << msg << std::endl;
         }
     }
+
+    // Extract embedded notification.mp3 resource to a temp file (once) and return its path
+    std::string GetNotificationSoundPath() {
+        // Temp file path: %TEMP%/IPMsgPro/notification.mp3
+        char tempPath[MAX_PATH] = {};
+        GetTempPathA(MAX_PATH, tempPath);
+        std::string dir = std::string(tempPath) + "IPMsgPro";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        std::string outPath = dir + "\\notification.mp3";
+
+        // If already extracted, reuse it
+        {
+            std::ifstream f(outPath, std::ios::binary);
+            if (f.good()) return outPath;
+        }
+
+        // Extract from embedded resource
+        HMODULE hModule = GetModuleHandle(nullptr);
+        HRSRC hRes = FindResourceA(hModule, MAKEINTRESOURCEA(IDR_NOTIFICATION_MP3), RT_RCDATA);
+        if (!hRes) {
+            WriteDebugLog("[SOUND] Failed to find notification.mp3 resource");
+            return "";
+        }
+        HGLOBAL hGlobal = LoadResource(hModule, hRes);
+        if (!hGlobal) return "";
+        DWORD size = SizeofResource(hModule, hRes);
+        void* pData = LockResource(hGlobal);
+        if (!pData || size == 0) return "";
+
+        std::ofstream out(outPath, std::ios::binary);
+        if (!out.good()) return "";
+        out.write(reinterpret_cast<const char*>(pData), size);
+        out.close();
+        WriteDebugLog("[SOUND] Extracted notification.mp3 to " + outPath);
+        return outPath;
+    }
+
+    // Play notification sound from embedded resource
+    void PlayNotificationSound() {
+        std::string soundPath = GetNotificationSoundPath();
+        if (soundPath.empty()) {
+            WriteDebugLog("[SOUND] No sound path, aborting");
+            return;
+        }
+
+        // Close any previous playback to avoid device conflicts
+        mciSendStringA("close notify_snd", nullptr, 0, nullptr);
+
+        // Use mciSendString to play MP3 asynchronously
+        std::string openCmd = "open \"" + soundPath + "\" type mpegvideo alias notify_snd";
+        MCIERROR err = mciSendStringA(openCmd.c_str(), nullptr, 0, nullptr);
+        if (err != 0) {
+            // Fallback: try without explicit type
+            std::string openCmd2 = "open \"" + soundPath + "\" alias notify_snd";
+            err = mciSendStringA(openCmd2.c_str(), nullptr, 0, nullptr);
+        }
+        if (err == 0) {
+            mciSendStringA("play notify_snd from 0", nullptr, 0, nullptr);
+            // Auto-close after a delay to release the device
+            std::thread([soundPath]() {
+                Sleep(3000);
+                mciSendStringA("close notify_snd", nullptr, 0, nullptr);
+            }).detach();
+            WriteDebugLog("[SOUND] Playing notification sound");
+        } else {
+            WriteDebugLog("[SOUND] mciSendString open failed, err=" + std::to_string(err));
+        }
+    }
 }
 
 CommandHandler& CommandHandler::Instance() {
@@ -118,6 +195,11 @@ void CommandHandler::SetNativeWindowHandle(void* hwnd) {
     hwnd_ = static_cast<void*>(hwnd);
     WriteDebugLog("[DIALOG] SetNativeWindowHandle called, hwnd=" + 
                   (hwnd ? std::to_string(reinterpret_cast<uintptr_t>(hwnd)) : "NULL"));
+}
+
+void CommandHandler::SetWindow(tauricpp::Window* window) {
+    window_ = window;
+    WriteDebugLog("[WINDOW] SetWindow called");
 }
 
 void CommandHandler::RegisterAllCommands() {
@@ -438,6 +520,16 @@ void CommandHandler::SetupEventForwarding() {
             // Emit message received event
             bridge_->Emit("message.received", j);
 
+            // Flash tray icon for new text messages (when window is hidden/minimized)
+            if (window_ && !window_->IsVisible()) {
+                window_->ShowTrayNotification("新消息", "");
+            }
+
+            // Play notification sound for new text messages
+            if (notificationSound_) {
+                PlayNotificationSound();
+            }
+
             // Do NOT auto-reply RECVMSG for file attachment notifications
             // RECVMSG should be sent when user clicks "Accept", not when notification is received
             // FeiQ interprets RECVMSG as "user accepted the file transfer"
@@ -465,6 +557,16 @@ void CommandHandler::SetupEventForwarding() {
                     {"fileId", fileId},
                     {"transferId", std::to_string(msg.packetNo)}
                 });
+
+                // Flash tray icon for file receive request (when window is hidden/minimized)
+                if (window_ && !window_->IsVisible()) {
+                    window_->ShowTrayNotification("文件接收", "");
+                }
+
+                // Play notification sound for file receive request
+                if (notificationSound_) {
+                    PlayNotificationSound();
+                }
             }
         } catch (const std::exception& e) {
             std::cerr << "[GUI-MSG] Exception in message callback: " << e.what() << std::endl;
@@ -527,6 +629,7 @@ nlohmann::json CommandHandler::HandleConfigSet(const nlohmann::json& args) {
     std::string nickname = args.value("nickname", "");
     std::string group = args.value("group", "");
     std::string dataDir = args.value("dataDir", "");
+    std::string minimizeBehavior = args.value("minimizeBehavior", "");
     
     if (!nickname.empty() || !group.empty()) {
         msgMng_->UpdateLocalInfo(nickname, group);
@@ -543,6 +646,18 @@ nlohmann::json CommandHandler::HandleConfigSet(const nlohmann::json& args) {
         // dataDir explicitly set to empty -> reset to default
         dataDir_.clear();
         WriteDebugLog("Config updated: dataDir reset to default");
+    }
+
+    // Store minimize behavior setting
+    if (args.contains("minimizeBehavior")) {
+        minimizeBehavior_ = args.value("minimizeBehavior", "taskbar");
+        WriteDebugLog("Config updated: minimizeBehavior=" + minimizeBehavior_);
+    }
+
+    // Store notification sound setting
+    if (args.contains("notificationSound")) {
+        notificationSound_ = args.value("notificationSound", true);
+        WriteDebugLog("Config updated: notificationSound=" + std::string(notificationSound_ ? "true" : "false"));
     }
     
     return {{"success", true}};

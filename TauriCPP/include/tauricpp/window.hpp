@@ -6,6 +6,7 @@
 #include <queue>
 #include <mutex>
 #include <Windows.h>
+#include <shellapi.h>  // NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW
 
 // WebView2 前向声明
 struct ICoreWebView2;
@@ -78,8 +79,11 @@ public:
     void Minimize();
     void Maximize();
     void Restore();
+    void Hide();        ///< Hide window (for minimize-to-tray)
+    void Show();        ///< Show window (restore from tray)
     bool IsMinimized() const;
     bool IsMaximized() const;
+    bool IsVisible() const;
     bool IsFocused() const;
 
     // ---- 窗口生命周期回调 ----
@@ -93,6 +97,21 @@ public:
 
     /// 切换DevTools（F12也会触发）
     void ToggleDevTools();
+
+    // ---- 系统托盘 API ----
+    /// Create system tray icon. iconPath is the .ico file path.
+    void CreateTrayIcon(const std::string& iconPath, const std::string& tooltip = "");
+    /// Remove system tray icon
+    void RemoveTrayIcon();
+    /// Update tray icon tooltip
+    void SetTrayTooltip(const std::string& tooltip);
+    /// Show balloon notification from tray
+    void ShowTrayNotification(const std::string& title, const std::string& message);
+    /// Set tray context menu items (label -> callback pairs). Show on right-click.
+    void SetTrayMenu(const std::vector<std::pair<std::string, std::function<void()>>>& items);
+    /// Tray click callback (left-click on tray icon)
+    using TrayClickCallback = std::function<void()>;
+    void OnTrayClick(TrayClickCallback cb) { on_tray_click_ = std::move(cb); }
 
 private:
     /// 创建Win32窗口
@@ -153,6 +172,25 @@ private:
     std::mutex asyncInvokeMutex_;
     std::queue<AsyncInvokeRequest> asyncInvokeQueue_;
     void ProcessAsyncInvokeQueue();
+
+    // 系统托盘
+    static constexpr UINT WM_TAURICPP_TRAY = WM_APP + 100;
+    static constexpr UINT TRAY_FLASH_TIMER_ID = 1001;  ///< 定时器ID（SetTimer用wParam传递）
+    NOTIFYICONDATAW trayIconData_ = {};
+    bool trayIconCreated_ = false;
+    std::vector<std::pair<std::string, std::function<void()>>> trayMenuItems_;
+    TrayClickCallback on_tray_click_;
+    HMENU trayMenu_ = nullptr;
+    std::string trayOriginalTooltip_;
+    void ProcessTrayMessage(WPARAM wParam, LPARAM lParam);
+
+    // 托盘图标闪烁（像微信：图标在 有/无 之间交替）
+    bool trayFlashing_ = false;
+    bool flashShowIcon_ = true;          ///< true=显示原图标, false=显示空图标
+    HICON trayOriginalIcon_ = nullptr;   ///< 保存原始图标
+    HICON trayBlankIcon_ = nullptr;      ///< 全透明空图标
+    void StartTrayFlash();
+    void StopTrayFlash();
 };
 
 } // namespace tauricpp
