@@ -1,11 +1,15 @@
 # ============================================================================
 # IPMsgPro Build Script
 # Usage: .\build.ps1 [-Config Debug|Release] [-Clean] [-Run] [-Port <port>]
+#                    [-Arch x64|x86] [-SkipFrontend]
 # ============================================================================
 
 param(
     [ValidateSet("Debug", "Release")]
     [string]$Config = "Release",
+
+    [ValidateSet("x64", "x86")]
+    [string]$Arch = "x64",
 
     [switch]$Clean,
     [switch]$Run,
@@ -15,13 +19,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
-$BuildDir = Join-Path $ProjectRoot "build"
+
+# Build directory includes architecture suffix
+$BuildDir = Join-Path $ProjectRoot "build_$Arch"
 $FrontendDir = Join-Path $ProjectRoot "frontend"
-$ExePath = Join-Path $BuildDir "$Config\IPMsgPro.exe"
+
+# Output exe name differs by architecture
+if ($Arch -eq "x64") {
+    $ExeName = "IPMsgPro.exe"
+} else {
+    $ExeName = "IPMsgPro_X86.exe"
+}
+$ExePath = Join-Path $BuildDir "$Config\$ExeName"
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " IPMsgPro Build Script" -ForegroundColor Cyan
 Write-Host " Config: $Config" -ForegroundColor Cyan
+Write-Host " Arch:   $Arch" -ForegroundColor Cyan
+Write-Host " Output: $ExeName" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # Step 1: Build frontend (always, unless -SkipFrontend)
@@ -43,8 +58,10 @@ if (-not $SkipFrontend) {
 }
 
 # Step 2: CMake configure
-Write-Host "`n[2/4] CMake configure (VS2022 x64)..." -ForegroundColor Yellow
-$cmakeArgs = @("-B", $BuildDir, "-G", "Visual Studio 17 2022", "-A", "x64")
+Write-Host "`n[2/4] CMake configure (VS2022 $Arch)..." -ForegroundColor Yellow
+# VS2022 uses "Win32" for x86, "x64" for x64
+$cmakeArch = if ($Arch -eq "x86") { "Win32" } else { "x64" }
+$cmakeArgs = @("-B", $BuildDir, "-G", "Visual Studio 17 2022", "-A", $cmakeArch)
 cmake @cmakeArgs 2>&1
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 Write-Host "CMake configure OK" -ForegroundColor Green

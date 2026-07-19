@@ -53,11 +53,24 @@ set(TAURICPP_DIR "${CMAKE_SOURCE_DIR}/TauriCPP")
 # nlohmann/json
 set(NLOHMANN_JSON_DIR "${TAURICPP_DIR}/third_party/nlohmann")
 
-# WebView2 SDK
+# Determine architecture from CMake generator (x64 or Win32/x86)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(BUILD_ARCH "x64")
+    set(WEBVIEW2_ARCH_PATH "x64-windows")
+else()
+    set(BUILD_ARCH "x86")
+    set(WEBVIEW2_ARCH_PATH "x86-windows")
+endif()
+
+message(STATUS "Building for architecture: ${BUILD_ARCH}")
+
+# WebView2 SDK - search paths vary by architecture
+# For third_party, include arch-specific subdirectory (e.g., lib/x64/, lib/x86/)
 set(WEBVIEW2_SEARCH_PATHS
-    "${TAURICPP_DIR}/vcpkg/installed/x64-windows"
-    "$ENV{VCPKG_ROOT}/installed/x64-windows"
-    "C:/vcpkg/installed/x64-windows"
+    "${TAURICPP_DIR}/vcpkg/installed/${WEBVIEW2_ARCH_PATH}"
+    "$ENV{VCPKG_ROOT}/installed/${WEBVIEW2_ARCH_PATH}"
+    "C:/vcpkg/installed/${WEBVIEW2_ARCH_PATH}"
+    "${CMAKE_SOURCE_DIR}/third_party/WebView2/${BUILD_ARCH}"
     "${CMAKE_SOURCE_DIR}/third_party/WebView2"
 )
 
@@ -84,9 +97,11 @@ message(STATUS "WebView2 include: ${WEBVIEW2_INCLUDE_DIR}")
 message(STATUS "WebView2 library: ${WEBVIEW2_LIBRARY}")
 
 # ============================================================================
-# TauriCPP Static Library
+# TauriCPP Static Library (per-architecture)
 # ============================================================================
-add_library(tauricpp STATIC
+set(TAURICPP_TARGET "tauricpp_${BUILD_ARCH}")
+
+add_library(${TAURICPP_TARGET} STATIC
     ${TAURICPP_DIR}/src/app.cpp
     ${TAURICPP_DIR}/src/bridge.cpp
     ${TAURICPP_DIR}/src/clipboard.cpp
@@ -96,13 +111,13 @@ add_library(tauricpp STATIC
     ${TAURICPP_DIR}/src/embedded_dll.cpp
 )
 
-target_include_directories(tauricpp PUBLIC
+target_include_directories(${TAURICPP_TARGET} PUBLIC
     ${TAURICPP_DIR}/include
     ${NLOHMANN_JSON_DIR}/..
     ${WEBVIEW2_INCLUDE_DIR}
 )
 
-target_link_libraries(tauricpp PUBLIC
+target_link_libraries(${TAURICPP_TARGET} PUBLIC
     shlwapi
     shell32
     comdlg32
@@ -111,21 +126,22 @@ target_link_libraries(tauricpp PUBLIC
 )
 
 # ============================================================================
-# SQLite3
+# SQLite3 (per-architecture)
 # ============================================================================
+set(SQLITE3_TARGET "sqlite3_${BUILD_ARCH}")
 set(SQLITE3_DIR "${CMAKE_SOURCE_DIR}/src/external/sqlite3")
 
-add_library(sqlite3 STATIC
+add_library(${SQLITE3_TARGET} STATIC
     ${SQLITE3_DIR}/sqlite3.c
 )
 
-target_include_directories(sqlite3 PUBLIC
+target_include_directories(${SQLITE3_TARGET} PUBLIC
     ${SQLITE3_DIR}
 )
 
 # SQLite3 needs threading support
 if(MSVC)
-    target_compile_definitions(sqlite3 PRIVATE
+    target_compile_definitions(${SQLITE3_TARGET} PRIVATE
         SQLITE_THREADSAFE=1
         SQLITE_OMIT_LOAD_EXTENSION
     )
@@ -175,6 +191,15 @@ if(MSVC)
     list(APPEND IPMSGPRO_ADDITIONAL_SOURCES "${CMAKE_SOURCE_DIR}/resources/app.rc")
 endif()
 
+# Determine output name based on architecture
+if(BUILD_ARCH STREQUAL "x64")
+    set(IPMSGPRO_OUTPUT_NAME "IPMsgPro")
+else()
+    set(IPMSGPRO_OUTPUT_NAME "IPMsgPro_X86")
+endif()
+
+message(STATUS "IPMsgPro output name: ${IPMSGPRO_OUTPUT_NAME}")
+
 add_executable(IPMsgPro WIN32
     ${IPMSGPRO_SOURCES}
     "${RESOURCE_MAP_CPP}"
@@ -182,8 +207,8 @@ add_executable(IPMsgPro WIN32
     ${IPMSGPRO_ADDITIONAL_SOURCES}
 )
 
-# Ensure output name is IPMsgPro.exe (CMake defaults to lowercase on Windows)
-set_target_properties(IPMsgPro PROPERTIES OUTPUT_NAME "IPMsgPro")
+# Ensure output name matches architecture
+set_target_properties(IPMsgPro PROPERTIES OUTPUT_NAME "${IPMSGPRO_OUTPUT_NAME}")
 
 target_include_directories(IPMsgPro PRIVATE
     "${CMAKE_SOURCE_DIR}/src"
@@ -195,8 +220,8 @@ target_include_directories(IPMsgPro PRIVATE
 )
 
 target_link_libraries(IPMsgPro PRIVATE
-    tauricpp
-    sqlite3
+    ${TAURICPP_TARGET}
+    ${SQLITE3_TARGET}
     ws2_32
     iphlpapi
 )
