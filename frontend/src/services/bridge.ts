@@ -91,6 +91,9 @@ function getMockResponse<T>(command: string, args?: Record<string, any>): T {
     case 'config.set':
       return { success: true } as T;
 
+    case 'dialog.pick_folder':
+      return { folder: '' } as T;
+
     default:
       return { success: false, error: 'Unknown command' } as T;
   }

@@ -9,7 +9,7 @@
 #include <sstream>
 #include <fstream>
 #include <iomanip>
-#include <Windows.h>  // For MultiByteToWideChar/WideCharToMultiByte
+#include <tauricpp/dialog.hpp>
 
 // ============================================================================
 // Utility: Convert GBK to UTF-8 on Windows
@@ -111,6 +111,10 @@ void CommandHandler::Init(tauricpp::Bridge& bridge, MsgMng& msgMng,
     fileTransfer_ = &fileTransfer;
 }
 
+void CommandHandler::SetNativeWindowHandle(void* hwnd) {
+    hwnd_ = static_cast<HWND>(hwnd);
+}
+
 void CommandHandler::RegisterAllCommands() {
     if (!bridge_) return;
 
@@ -159,6 +163,10 @@ void CommandHandler::RegisterAllCommands() {
     // Config
     bridge_->RegisterCommand("config.set",
         [this](const nlohmann::json& args) { return HandleConfigSet(args); });
+
+    // Dialog
+    bridge_->RegisterCommand("dialog.pick_folder",
+        [this](const nlohmann::json& args) { return HandleDialogPickFolder(args); });
 
 }
 
@@ -1152,6 +1160,23 @@ std::optional<UserInfo> CommandHandler::FindUserFromArgs(const nlohmann::json& a
         }
     }
     return std::nullopt;
+}
+
+// ---------- Dialog Commands ----------
+
+nlohmann::json CommandHandler::HandleDialogPickFolder(const nlohmann::json& args) {
+    std::string title = args.value("title", "Select Folder");
+
+    if (!hwnd_) {
+        return {{"success", false}, {"error", "Window handle not available"}};
+    }
+
+    HWND hWnd = static_cast<HWND>(hwnd_);
+    auto folder = tauricpp::Dialog::PickFolder(hWnd, title);
+    if (folder) {
+        return {{"success", true}, {"folder", *folder}};
+    }
+    return {{"success", true}, {"folder", ""}};  // User cancelled
 }
 
 } // namespace ipmsg

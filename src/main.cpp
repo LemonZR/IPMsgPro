@@ -779,7 +779,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
     app.OnSetup([&](tauricpp::App& app) {
         LOG_INFO("App setup callback started");
-        
+
+        // Set main window handle for dialog commands
+        cmdHandler.SetNativeWindowHandle(app.GetWindow().GetHwnd());
+
         // Set window close handler
         app.GetWindow().OnClose([&]() -> bool {
             LOG_INFO("Window close requested");

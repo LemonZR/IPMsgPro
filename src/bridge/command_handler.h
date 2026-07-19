@@ -24,6 +24,9 @@ public:
               MessageDB& msgDb,
               FileTransferManager& fileTransfer);
 
+    /// Set main window handle (call after window is created)
+    void SetNativeWindowHandle(void* hwnd);
+
     /// Register all Bridge commands
     void RegisterAllCommands();
 
@@ -62,6 +65,9 @@ private:
     // --- Config Commands ---
     nlohmann::json HandleConfigSet(const nlohmann::json& args);
 
+    // --- Dialog Commands ---
+    nlohmann::json HandleDialogPickFolder(const nlohmann::json& args);
+
     // --- Helper: Convert UserInfo to JSON ---
     static nlohmann::json UserToJson(const UserInfo& user);
 
@@ -73,6 +79,7 @@ private:
     MsgMng* msgMng_ = nullptr;
     MessageDB* msgDb_ = nullptr;
     FileTransferManager* fileTransfer_ = nullptr;
+    void* hwnd_ = nullptr;  // Main window handle for dialogs (cast to HWND in cpp)
 };
 
 } // namespace ipmsg

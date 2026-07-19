@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { FiX, FiPlus, FiTrash2, FiFolder, FiRotateCcw } from 'react-icons/fi';
 import { useConfigStore } from '../stores/configStore';
 import { Config, DEFAULT_CONFIG } from '../types';
+import { invoke } from '../services/bridge';
 
 interface SettingsProps {
   onClose: () => void;
@@ -46,38 +47,19 @@ export default function Settings({ onClose }: SettingsProps) {
     });
   };
 
-  const handleBrowseDataDir = async () => {
+  const handlePickFolder = async (field: 'dataDir' | 'debugDir') => {
     try {
-      if ((window as any).__tauricpp__?.selectFolder) {
-        const folder = await (window as any).__tauricpp__.selectFolder();
-        if (folder) {
-          setLocalConfig({ ...localConfig, dataDir: folder });
-        }
+      const result = await invoke<{ folder?: string }>('dialog.pick_folder', { title: '选择目录' });
+      if (result.folder) {
+        setLocalConfig({ ...localConfig, [field]: result.folder });
       }
     } catch (e) {
-      console.error('Failed to select folder:', e);
+      console.error('Failed to pick folder:', e);
     }
   };
 
-  const handleBrowseDebugDir = async () => {
-    try {
-      if ((window as any).__tauricpp__?.selectFolder) {
-        const folder = await (window as any).__tauricpp__.selectFolder();
-        if (folder) {
-          setLocalConfig({ ...localConfig, debugDir: folder });
-        }
-      }
-    } catch (e) {
-      console.error('Failed to select folder:', e);
-    }
-  };
-
-  const handleResetDataDir = () => {
-    setLocalConfig({ ...localConfig, dataDir: '' });
-  };
-
-  const handleResetDebugDir = () => {
-    setLocalConfig({ ...localConfig, debugDir: '' });
+  const handleResetDir = (field: 'dataDir' | 'debugDir') => {
+    setLocalConfig({ ...localConfig, [field]: '' });
   };
 
   const displayDataDir = localConfig.dataDir || getDefaultDataDir() || '~/.IPMsgPro';
@@ -183,14 +165,14 @@ export default function Settings({ onClose }: SettingsProps) {
                 />
                 <button
                   className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={handleBrowseDataDir}
+                  onClick={() => handlePickFolder('dataDir')}
                   title="浏览选择目录"
                 >
                   <FiFolder size={16} />
                 </button>
                 <button
                   className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={handleResetDataDir}
+                  onClick={() => handleResetDir('dataDir')}
                   title="恢复默认"
                 >
                   <FiRotateCcw size={16} />
@@ -214,14 +196,14 @@ export default function Settings({ onClose }: SettingsProps) {
                 />
                 <button
                   className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={handleBrowseDebugDir}
+                  onClick={() => handlePickFolder('debugDir')}
                   title="浏览选择目录"
                 >
                   <FiFolder size={16} />
                 </button>
                 <button
                   className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={handleResetDebugDir}
+                  onClick={() => handleResetDir('debugDir')}
                   title="恢复默认"
                 >
                   <FiRotateCcw size={16} />
