@@ -48,6 +48,7 @@ CMakeUserPresets.json
 *.la
 *.a
 *.lib
+!third_party/WebView2/**/*.lib
 
 # Generated
 *.pdb
