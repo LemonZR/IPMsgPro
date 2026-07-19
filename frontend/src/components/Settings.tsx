@@ -1,11 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { FiX, FiPlus, FiTrash2 } from 'react-icons/fi';
+import { FiX, FiPlus, FiTrash2, FiFolder, FiRotateCcw } from 'react-icons/fi';
 import { useConfigStore } from '../stores/configStore';
-import { Config } from '../types';
+import { Config, DEFAULT_CONFIG } from '../types';
 
 interface SettingsProps {
   onClose: () => void;
 }
+
+/** Default data directory under user home */
+const getDefaultDataDir = (): string => {
+  // Use user home directory + .IPMsgPro
+  const home = (typeof window !== 'undefined' && (window as any).__tauricpp__?.homeDir) || '';
+  return home ? `${home}/.IPMsgPro`.replace(/\\/g, '/') : '';
+};
 
 export default function Settings({ onClose }: SettingsProps) {
   const config = useConfigStore((s) => s.config);
@@ -38,6 +45,43 @@ export default function Settings({ onClose }: SettingsProps) {
       segments: localConfig.segments.filter((_, i) => i !== index),
     });
   };
+
+  const handleBrowseDataDir = async () => {
+    try {
+      if ((window as any).__tauricpp__?.selectFolder) {
+        const folder = await (window as any).__tauricpp__.selectFolder();
+        if (folder) {
+          setLocalConfig({ ...localConfig, dataDir: folder });
+        }
+      }
+    } catch (e) {
+      console.error('Failed to select folder:', e);
+    }
+  };
+
+  const handleBrowseDebugDir = async () => {
+    try {
+      if ((window as any).__tauricpp__?.selectFolder) {
+        const folder = await (window as any).__tauricpp__.selectFolder();
+        if (folder) {
+          setLocalConfig({ ...localConfig, debugDir: folder });
+        }
+      }
+    } catch (e) {
+      console.error('Failed to select folder:', e);
+    }
+  };
+
+  const handleResetDataDir = () => {
+    setLocalConfig({ ...localConfig, dataDir: '' });
+  };
+
+  const handleResetDebugDir = () => {
+    setLocalConfig({ ...localConfig, debugDir: '' });
+  };
+
+  const displayDataDir = localConfig.dataDir || getDefaultDataDir() || '~/.IPMsgPro';
+  const displayDebugDir = localConfig.debugDir || getDefaultDataDir() || '~/.IPMsgPro';
 
   return (
     <div className="flex-1 flex flex-col bg-white">
@@ -126,18 +170,68 @@ export default function Settings({ onClose }: SettingsProps) {
             </div>
           </Section>
 
-          {/* Test mode */}
-          <Section title="本地测试">
-            <Field label="本地测试模式">
-              <label className="flex items-center gap-2 cursor-pointer">
+          {/* Data directory */}
+          <Section title="数据目录">
+            <Field label="聊天记录存储目录">
+              <div className="flex items-center gap-2">
                 <input
-                  type="checkbox"
-                  checked={localConfig.localTestMode}
-                  onChange={(e) => setLocalConfig({ ...localConfig, localTestMode: e.target.checked })}
-                  className="w-4 h-4 text-primary-500 rounded"
+                  type="text"
+                  value={localConfig.dataDir}
+                  onChange={(e) => setLocalConfig({ ...localConfig, dataDir: e.target.value })}
+                  className="input-field flex-1"
+                  placeholder={`默认: ${getDefaultDataDir() || '~/.IPMsgPro'}`}
                 />
-                <span className="text-sm text-gray-600">启用本地回环测试（127.0.0.1）</span>
-              </label>
+                <button
+                  className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
+                  onClick={handleBrowseDataDir}
+                  title="浏览选择目录"
+                >
+                  <FiFolder size={16} />
+                </button>
+                <button
+                  className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
+                  onClick={handleResetDataDir}
+                  title="恢复默认"
+                >
+                  <FiRotateCcw size={16} />
+                </button>
+              </div>
+              {localConfig.dataDir ? (
+                <p className="text-xs text-gray-400 mt-1">当前: {localConfig.dataDir}</p>
+              ) : (
+                <p className="text-xs text-gray-400 mt-1">默认: {displayDataDir}</p>
+              )}
+            </Field>
+
+            <Field label="Debug 信息目录">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={localConfig.debugDir}
+                  onChange={(e) => setLocalConfig({ ...localConfig, debugDir: e.target.value })}
+                  className="input-field flex-1"
+                  placeholder={`默认: ${getDefaultDataDir() || '~/.IPMsgPro'}`}
+                />
+                <button
+                  className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
+                  onClick={handleBrowseDebugDir}
+                  title="浏览选择目录"
+                >
+                  <FiFolder size={16} />
+                </button>
+                <button
+                  className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
+                  onClick={handleResetDebugDir}
+                  title="恢复默认"
+                >
+                  <FiRotateCcw size={16} />
+                </button>
+              </div>
+              {localConfig.debugDir ? (
+                <p className="text-xs text-gray-400 mt-1">当前: {localConfig.debugDir}</p>
+              ) : (
+                <p className="text-xs text-gray-400 mt-1">默认: {displayDebugDir}</p>
+              )}
             </Field>
           </Section>
         </div>

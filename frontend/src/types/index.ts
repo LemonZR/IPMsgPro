@@ -49,8 +49,8 @@ export interface Config {
   segments: string[];   // multi-segment broadcast addresses
   port: number;
   autoDiscovery: boolean;
-  localTestMode: boolean;
-  localTestUsers: string[];
+  dataDir: string;      // chat history & data directory
+  debugDir: string;     // debug log directory
 }
 
 /** File transfer type */
@@ -110,6 +110,11 @@ export interface FileReceiveRequestEvent {
   transferId?: string;
 }
 
+/** Default data directory under user home */
+const getDefaultDataDir = (): string => {
+  return `${import.meta.env.VITE_HOME || ''}/.IPMsgPro`.replace(/\/\//g, '/');
+};
+
 /** Default config */
 export const DEFAULT_CONFIG: Config = {
   nickname: '',
@@ -117,6 +122,6 @@ export const DEFAULT_CONFIG: Config = {
   segments: [],
   port: 2425,
   autoDiscovery: true,
-  localTestMode: false,
-  localTestUsers: [],
+  dataDir: '',
+  debugDir: '',
 };

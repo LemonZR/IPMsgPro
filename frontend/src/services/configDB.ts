@@ -115,11 +115,11 @@ class ConfigDB {
     const autoDiscovery = await this.get<boolean>('autoDiscovery');
     if (autoDiscovery !== null) config.autoDiscovery = autoDiscovery;
 
-    const localTestMode = await this.get<boolean>('localTestMode');
-    if (localTestMode !== null) config.localTestMode = localTestMode;
+    const dataDir = await this.get<string>('dataDir');
+    if (dataDir) config.dataDir = dataDir;
 
-    const localTestUsers = await this.get<string[]>('localTestUsers');
-    if (localTestUsers) config.localTestUsers = localTestUsers;
+    const debugDir = await this.get<string>('debugDir');
+    if (debugDir) config.debugDir = debugDir;
 
     return config;
   }
