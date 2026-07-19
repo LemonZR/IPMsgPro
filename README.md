@@ -50,30 +50,40 @@ IPMsgPro/
 - CMake 3.15+
 - Python 3（用于资源打包）
 - Node.js 18+
-- vcpkg（安装 WebView2 SDK）
 
 ### 构建步骤
 
 ```powershell
-# 1. 安装前端依赖
-cd frontend
-npm install
+# 一键构建（自动安装前端依赖、构建前端、编译 C++）
+.\build.ps1 -Arch x64          # 编译 x64 → build_x64/Release/IPMsgPro.exe
+.\build.ps1 -Arch x86          # 编译 x86 → build_x86/Release/IPMsgPro_X86.exe
 
-# 2. 构建前端
-npm run build
-
-# 3. 构建 C++ 后端
-cd ..
-cmake -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-
-# 输出: build/Release/IPMsgPro.exe
+# 其他选项
+.\build.ps1 -Arch x64 -Config Debug   # Debug 模式
+.\build.ps1 -Arch x86 -Clean          # 清理重编
+.\build.ps1 -Arch x64 -Run            # 编译完自动运行
+.\build.ps1 -Arch x64 -SkipFrontend   # 跳过前端构建（前端未改动时）
 ```
 
-或使用一键构建脚本：
+### 手动构建
 
 ```powershell
-.\build.ps1
+# 1. 安装前端依赖并构建
+cd frontend
+npm install
+npm run build
+
+# 2. 编译 C++（x64 / x86 二选一或都编译）
+cd ..
+cmake -B build_x64 -G "Visual Studio 17 2022" -A x64
+cmake --build build_x64 --config Release
+
+cmake -B build_x86 -G "Visual Studio 17 2022" -A Win32
+cmake --build build_x86 --config Release
+
+# 输出:
+#   build_x64/Release/IPMsgPro.exe
+#   build_x86/Release/IPMsgPro_X86.exe
 ```
 
 ## 协议兼容
