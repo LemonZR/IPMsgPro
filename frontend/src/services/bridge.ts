@@ -92,7 +92,7 @@ function getMockResponse<T>(command: string, args?: Record<string, any>): T {
       return { success: true } as T;
 
     case 'dialog.pick_folder':
-      return { folder: '' } as T;
+      return { success: true, folder: '' } as T;
 
     default:
       return { success: false, error: 'Unknown command' } as T;

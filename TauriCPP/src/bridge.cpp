@@ -2,6 +2,11 @@
 #include <sstream>
 #include <iostream>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <shlobj.h>
+#endif
+
 namespace tauricpp {
 
 Bridge& Bridge::Instance() {
@@ -79,12 +84,31 @@ void Bridge::SetExecuteJsCallback(ExecuteJsCallback cb) {
 }
 
 std::string Bridge::GetBridgeJs() {
-    return R"js(
+    // Get user home directory for injecting into frontend
+    std::string homeDir;
+#ifdef _WIN32
+    char userProfile[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) > 0) {
+        homeDir = userProfile;
+    } else {
+        SHGetFolderPathA(nullptr, CSIDL_PROFILE, nullptr, 0, userProfile);
+        homeDir = userProfile;
+    }
+    // Convert backslashes to forward slashes for JS
+    for (auto& c : homeDir) {
+        if (c == '\\') c = '/';
+    }
+#endif
+
+    // Build the bridge JS with injected homeDir and default dataDir
+    std::string js = R"js(
 (function() {
     const __tauricpp__ = {
         _listeners: {},
         _invokeId: 0,
         _invokeCallbacks: {},
+        homeDir: )js" + std::string("\"") + homeDir + "\"" + R"js(,
+        defaultDataDir: )js" + std::string("\"") + homeDir + "/.ipmsgpro\"" + R"js(,
 
         invoke: function(cmd, args) {
             return new Promise((resolve, reject) => {
@@ -165,6 +189,8 @@ std::string Bridge::GetBridgeJs() {
     window.__tauricpp__ = __tauricpp__;
 })();
 )js";
+
+    return js;
 }
 
 } // namespace tauricpp

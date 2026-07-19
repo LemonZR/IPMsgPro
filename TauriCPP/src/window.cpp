@@ -1,6 +1,7 @@
 #include "tauricpp/window.hpp"
 #include "tauricpp/bridge.hpp"
 #include "tauricpp/virtual_fs.hpp"
+#include <nlohmann/json.hpp>
 
 #include <WebView2.h>
 #include <wrl.h>
@@ -16,6 +17,7 @@ using namespace Microsoft::WRL;
 
 // 自定义窗口消息 - 用于投递JS到UI线程执行
 static const UINT WM_TAURICP_EXECUTE_JS = WM_APP + 1;
+static const UINT WM_TAURICP_ASYNC_INVOKE = WM_APP + 2;
 
 
 // ============================================================================
@@ -261,6 +263,12 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_TAURICP_EXECUTE_JS:
         if (self) {
             self->ExecuteJsFromQueue();
+        }
+        return 0;
+
+    case WM_TAURICP_ASYNC_INVOKE:
+        if (self) {
+            self->ProcessAsyncInvokeQueue();
         }
         return 0;
 
@@ -587,9 +595,12 @@ void Window::SetupBridge() {
     // 监听来自前端的消息
     ComPtr<ICoreWebView2_2> webview2;
     if (SUCCEEDED(webview_->QueryInterface(IID_PPV_ARGS(&webview2)))) {
+        // Capture 'this' so we can access Window members in the callback
+        Window* self = this;
+        HWND selfHwnd = hwnd_;
         webview2->add_WebMessageReceived(
             Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-                [](ICoreWebView2* sender, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                [self, selfHwnd](ICoreWebView2* sender, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
                     LPWSTR msgW = nullptr;
                     args->get_WebMessageAsJson(&msgW);
                     std::string msgJson = WideToUtf8(msgW);
@@ -609,21 +620,35 @@ void Window::SetupBridge() {
                             std::string cmd = msg["cmd"].get<std::string>();
                             std::string argsStr = msg["args"].dump();
 
-                            std::string resultJson = Bridge::Instance().HandleInvoke(cmd, argsStr);
+                            // Blocking commands (like dialog.pick_folder) must be deferred
+                            // to the UI thread via PostMessage, because calling blocking
+                            // modal dialogs inside WebView2's callback can cause issues.
+                            if (cmd == "dialog.pick_folder") {
+                                // Enqueue request to Window's async invoke queue
+                                {
+                                    std::lock_guard<std::mutex> lock(self->asyncInvokeMutex_);
+                                    self->asyncInvokeQueue_.push({id, cmd, argsStr});
+                                }
+                                // PostMessage to trigger processing in WndProc
+                                PostMessageW(selfHwnd, WM_TAURICP_ASYNC_INVOKE, 0, 0);
+                            } else {
+                                // Non-blocking commands: process synchronously in callback
+                                std::string resultJson = Bridge::Instance().HandleInvoke(cmd, argsStr);
 
-                            // 将结果发回前端
-                            nlohmann::json response;
-                            response["__tauricpp_result"] = true;
-                            response["id"] = id;
-                            try {
-                                response["result"] = nlohmann::json::parse(resultJson);
-                            } catch (...) {
-                                response["result"] = resultJson;
+                                // 将结果发回前端
+                                nlohmann::json response;
+                                response["__tauricpp_result"] = true;
+                                response["id"] = id;
+                                try {
+                                    response["result"] = nlohmann::json::parse(resultJson);
+                                } catch (...) {
+                                    response["result"] = resultJson;
+                                }
+
+                                // Use replace error handler to avoid type_error.316 on non-UTF-8 strings
+                                std::string responseStr = response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+                                sender->PostWebMessageAsJson(Utf8ToWide(responseStr).c_str());
                             }
-
-                            // Use replace error handler to avoid type_error.316 on non-UTF-8 strings
-                            std::string responseStr = response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-                            sender->PostWebMessageAsJson(Utf8ToWide(responseStr).c_str());
                         }
                     } catch (const std::exception&) {}
 
@@ -796,6 +821,11 @@ void Window::ToggleDevTools() {
 int Window::Run() {
     if (!CreateNativeWindow()) return -1;
 
+    // Trigger OnCreated callback (hwnd_ is now valid)
+    if (on_created_) {
+        on_created_(*this);
+    }
+
     // 记录主线程ID
     mainThreadId_ = GetCurrentThreadId();
 
@@ -813,6 +843,38 @@ int Window::Run() {
     }
 
     return static_cast<int>(msg.wParam);
+}
+
+// ============================================================================
+// 异步invoke处理：在UI线程处理阻塞型命令（如dialog.pick_folder）
+// ============================================================================
+void Window::ProcessAsyncInvokeQueue() {
+    if (!webview_ || !webview_ready_ || shutting_down_) return;
+
+    while (true) {
+        AsyncInvokeRequest req;
+        {
+            std::lock_guard<std::mutex> lock(asyncInvokeMutex_);
+            if (asyncInvokeQueue_.empty()) break;
+            req = asyncInvokeQueue_.front();
+            asyncInvokeQueue_.pop();
+        }
+
+        // Execute the handler on the UI thread (safe to call blocking dialogs here)
+        std::string resultJson = Bridge::Instance().HandleInvoke(req.cmd, req.args_json);
+
+        // Build response and send back to frontend via WebView2
+        nlohmann::json response;
+        response["__tauricpp_result"] = true;
+        response["id"] = req.id;
+        try {
+            response["result"] = nlohmann::json::parse(resultJson);
+        } catch (...) {
+            response["result"] = resultJson;
+        }
+        std::string responseStr = response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        webview_->PostWebMessageAsJson(Utf8ToWide(responseStr).c_str());
+    }
 }
 
 void Window::Close() {

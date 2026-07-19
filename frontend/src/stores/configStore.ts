@@ -44,6 +44,16 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
         }
       }
 
+      // Apply saved dataDir to backend immediately on startup
+      if (config.dataDir) {
+        console.log('[ConfigStore] Applying saved dataDir to backend:', config.dataDir);
+        try {
+          await invoke('config.set', { dataDir: config.dataDir });
+        } catch (e) {
+          console.error('[ConfigStore] Failed to set dataDir on backend:', e);
+        }
+      }
+
     } catch (err) {
       console.error('[ConfigStore] Failed to load config:', err);
       set({ loaded: true });
@@ -64,6 +74,13 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       if (nickname !== undefined) {
         console.log('[ConfigStore] Notifying backend of nickname change:', nickname);
         await invoke('config.set', { nickname });
+      }
+
+      // Notify backend of dataDir changes
+      const dataDir = partial.dataDir;
+      if (dataDir !== undefined) {
+        console.log('[ConfigStore] Notifying backend of dataDir change:', dataDir);
+        await invoke('config.set', { dataDir });
       }
     } catch (err) {
       console.error('[ConfigStore] Failed to save config:', err);

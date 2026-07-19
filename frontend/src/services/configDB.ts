@@ -118,9 +118,6 @@ class ConfigDB {
     const dataDir = await this.get<string>('dataDir');
     if (dataDir) config.dataDir = dataDir;
 
-    const debugDir = await this.get<string>('debugDir');
-    if (debugDir) config.debugDir = debugDir;
-
     return config;
   }
 

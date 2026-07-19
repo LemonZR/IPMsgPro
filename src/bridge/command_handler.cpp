@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <tauricpp/dialog.hpp>
+#include <shlobj.h>
 
 // ============================================================================
 // Utility: Convert GBK to UTF-8 on Windows
@@ -78,12 +79,14 @@ namespace ipmsg {
 namespace {
     // Simple file logger for debugging GUI message flow
     void WriteDebugLog(const std::string& msg) {
-        char exePath[MAX_PATH] = {};
-        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-        std::string dir = std::string(exePath);
-        dir = dir.substr(0, dir.find_last_of('\\'));
-        std::string logPath = dir + "\\IPMsgPro\\ipmsg_gui_debug.log";
-        CreateDirectoryA((dir + "\\IPMsgPro").c_str(), nullptr);
+        // Use USERPROFILE\.ipmsgpro for debug log (same as data directory)
+        char userProfile[MAX_PATH] = {};
+        if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) <= 0) {
+            SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, userProfile);
+        }
+        std::string dir = std::string(userProfile) + "\\.ipmsgpro";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        std::string logPath = dir + "\\ipmsg_gui_debug.log";
         
         std::ofstream log(logPath, std::ios::app);
         if (log.is_open()) {
@@ -112,7 +115,9 @@ void CommandHandler::Init(tauricpp::Bridge& bridge, MsgMng& msgMng,
 }
 
 void CommandHandler::SetNativeWindowHandle(void* hwnd) {
-    hwnd_ = static_cast<HWND>(hwnd);
+    hwnd_ = static_cast<void*>(hwnd);
+    WriteDebugLog("[DIALOG] SetNativeWindowHandle called, hwnd=" + 
+                  (hwnd ? std::to_string(reinterpret_cast<uintptr_t>(hwnd)) : "NULL"));
 }
 
 void CommandHandler::RegisterAllCommands() {
@@ -521,11 +526,23 @@ nlohmann::json CommandHandler::HandleUserLocal(const nlohmann::json& args) {
 nlohmann::json CommandHandler::HandleConfigSet(const nlohmann::json& args) {
     std::string nickname = args.value("nickname", "");
     std::string group = args.value("group", "");
+    std::string dataDir = args.value("dataDir", "");
     
     if (!nickname.empty() || !group.empty()) {
         msgMng_->UpdateLocalInfo(nickname, group);
         std::cout << "[BACKEND-CONFIG] Updated: nickname=" << nickname << ", group=" << group << std::endl;
         WriteDebugLog("Config updated: nickname=" + nickname + ", group=" + group);
+    }
+
+    // Store custom data directory (used for downloads etc.)
+    if (!dataDir.empty()) {
+        dataDir_ = dataDir;
+        CreateDirectoryA(dataDir_.c_str(), nullptr);
+        WriteDebugLog("Config updated: dataDir=" + dataDir_);
+    } else if (args.contains("dataDir") && args["dataDir"].is_string() && args["dataDir"].get<std::string>().empty()) {
+        // dataDir explicitly set to empty -> reset to default
+        dataDir_.clear();
+        WriteDebugLog("Config updated: dataDir reset to default");
     }
     
     return {{"success", true}};
@@ -945,14 +962,12 @@ nlohmann::json CommandHandler::HandleFileAccept(const nlohmann::json& args) {
     uint64_t origPacketNo = args.value("packetNo", (uint64_t)0);
     int origFileId = args.value("fileId", 0);
 
-    // If savePath is empty, auto-generate using Downloads folder
+    // If savePath is empty, auto-generate using data directory Downloads folder
     if (savePath.empty() && !fileName.empty()) {
-        char userProfile[MAX_PATH];
-        if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) > 0) {
-            savePath = std::string(userProfile) + "\\Downloads\\" + fileName;
-        } else {
-            savePath = "C:\\Users\\User\\Downloads\\" + fileName;
-        }
+        std::string baseDir = GetDataDir();
+        std::string saveDir = baseDir + "\\Downloads";
+        CreateDirectoryA(saveDir.c_str(), nullptr);
+        savePath = saveDir + "\\" + fileName;
     }
     WriteDebugLog("[BACKEND-ACCEPT] savePath=" + savePath);
 
@@ -1166,17 +1181,36 @@ std::optional<UserInfo> CommandHandler::FindUserFromArgs(const nlohmann::json& a
 
 nlohmann::json CommandHandler::HandleDialogPickFolder(const nlohmann::json& args) {
     std::string title = args.value("title", "Select Folder");
+    WriteDebugLog("[DIALOG] HandleDialogPickFolder called, title=" + title);
 
     if (!hwnd_) {
+        WriteDebugLog("[DIALOG] ERROR: hwnd_ is null!");
         return {{"success", false}, {"error", "Window handle not available"}};
     }
 
+    WriteDebugLog("[DIALOG] hwnd_=" + std::to_string(reinterpret_cast<uintptr_t>(hwnd_)));
     HWND hWnd = static_cast<HWND>(hwnd_);
+    WriteDebugLog("[DIALOG] Calling PickFolder with hWnd=" + std::to_string(reinterpret_cast<uintptr_t>(hWnd)));
+    
     auto folder = tauricpp::Dialog::PickFolder(hWnd, title);
+    WriteDebugLog("[DIALOG] PickFolder returned, folder=" + (folder ? *folder : "(empty)"));
+    
     if (folder) {
         return {{"success", true}, {"folder", *folder}};
     }
     return {{"success", true}, {"folder", ""}};  // User cancelled
+}
+
+std::string CommandHandler::GetDataDir() const {
+    // If custom dataDir is set, use it; otherwise use default (USERPROFILE\.ipmsgpro)
+    if (!dataDir_.empty()) {
+        return dataDir_;
+    }
+    char userProfile[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) <= 0) {
+        SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, userProfile);
+    }
+    return std::string(userProfile) + "\\.ipmsgpro";
 }
 
 } // namespace ipmsg

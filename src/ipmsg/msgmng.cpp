@@ -35,8 +35,10 @@ static void EnsureLogInit() {
     s_logInitialized = true;
     
     char path[MAX_PATH] = {};
-    SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path);
-    std::string dir = std::string(path) + "\\IPMsgPro";
+    if (GetEnvironmentVariableA("USERPROFILE", path, MAX_PATH) <= 0) {
+        SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path);
+    }
+    std::string dir = std::string(path) + "\\.ipmsgpro";
     CreateDirectoryA(dir.c_str(), nullptr);
     s_logFile.open(dir + "\\msgmng.log", std::ios::app);
 }

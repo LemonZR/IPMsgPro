@@ -10,9 +10,8 @@ interface SettingsProps {
 
 /** Default data directory under user home */
 const getDefaultDataDir = (): string => {
-  // Use user home directory + .IPMsgPro
-  const home = (typeof window !== 'undefined' && (window as any).__tauricpp__?.homeDir) || '';
-  return home ? `${home}/.IPMsgPro`.replace(/\\/g, '/') : '';
+  // Use backend-injected defaultDataDir (matches backend GetAppDataDir)
+  return (typeof window !== 'undefined' && (window as any).__tauricpp__?.defaultDataDir) || '';
 };
 
 export default function Settings({ onClose }: SettingsProps) {
@@ -47,23 +46,23 @@ export default function Settings({ onClose }: SettingsProps) {
     });
   };
 
-  const handlePickFolder = async (field: 'dataDir' | 'debugDir') => {
+  const handlePickFolder = async () => {
     try {
-      const result = await invoke<{ folder?: string }>('dialog.pick_folder', { title: '选择目录' });
-      if (result.folder) {
-        setLocalConfig({ ...localConfig, [field]: result.folder });
+      const result = await invoke<{ success?: boolean; folder?: string }>('dialog.pick_folder', { title: '选择聊天记录目录' });
+      console.log('[Settings] dialog.pick_folder result:', JSON.stringify(result));
+      if (result.success && result.folder) {
+        setLocalConfig({ ...localConfig, dataDir: result.folder });
       }
     } catch (e) {
       console.error('Failed to pick folder:', e);
     }
   };
 
-  const handleResetDir = (field: 'dataDir' | 'debugDir') => {
-    setLocalConfig({ ...localConfig, [field]: '' });
+  const handleResetDir = () => {
+    setLocalConfig({ ...localConfig, dataDir: '' });
   };
 
-  const displayDataDir = localConfig.dataDir || getDefaultDataDir() || '~/.IPMsgPro';
-  const displayDebugDir = localConfig.debugDir || getDefaultDataDir() || '~/.IPMsgPro';
+  const displayDataDir = localConfig.dataDir || getDefaultDataDir() || '~/.ipmsgpro';
 
   return (
     <div className="flex-1 flex flex-col bg-white">
@@ -161,18 +160,18 @@ export default function Settings({ onClose }: SettingsProps) {
                   value={localConfig.dataDir}
                   onChange={(e) => setLocalConfig({ ...localConfig, dataDir: e.target.value })}
                   className="input-field flex-1"
-                  placeholder={`默认: ${getDefaultDataDir() || '~/.IPMsgPro'}`}
+                  placeholder={`默认: ${getDefaultDataDir() || '~/.ipmsgpro'}`}
                 />
                 <button
                   className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={() => handlePickFolder('dataDir')}
+                  onClick={handlePickFolder}
                   title="浏览选择目录"
                 >
                   <FiFolder size={16} />
                 </button>
                 <button
                   className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={() => handleResetDir('dataDir')}
+                  onClick={handleResetDir}
                   title="恢复默认"
                 >
                   <FiRotateCcw size={16} />
@@ -182,37 +181,6 @@ export default function Settings({ onClose }: SettingsProps) {
                 <p className="text-xs text-gray-400 mt-1">当前: {localConfig.dataDir}</p>
               ) : (
                 <p className="text-xs text-gray-400 mt-1">默认: {displayDataDir}</p>
-              )}
-            </Field>
-
-            <Field label="Debug 信息目录">
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={localConfig.debugDir}
-                  onChange={(e) => setLocalConfig({ ...localConfig, debugDir: e.target.value })}
-                  className="input-field flex-1"
-                  placeholder={`默认: ${getDefaultDataDir() || '~/.IPMsgPro'}`}
-                />
-                <button
-                  className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={() => handlePickFolder('debugDir')}
-                  title="浏览选择目录"
-                >
-                  <FiFolder size={16} />
-                </button>
-                <button
-                  className="p-1.5 text-gray-400 hover:text-primary-500 border border-gray-200 rounded hover:border-primary-300"
-                  onClick={() => handleResetDir('debugDir')}
-                  title="恢复默认"
-                >
-                  <FiRotateCcw size={16} />
-                </button>
-              </div>
-              {localConfig.debugDir ? (
-                <p className="text-xs text-gray-400 mt-1">当前: {localConfig.debugDir}</p>
-              ) : (
-                <p className="text-xs text-gray-400 mt-1">默认: {displayDebugDir}</p>
               )}
             </Field>
           </Section>

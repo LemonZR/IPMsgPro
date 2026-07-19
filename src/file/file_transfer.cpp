@@ -17,16 +17,19 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shlobj.h>
 #endif
 
 namespace {
     void WriteTransferLog(const std::string& msg) {
-        char exePath[MAX_PATH] = {};
-        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-        std::string dir = std::string(exePath);
-        dir = dir.substr(0, dir.find_last_of('\\'));
-        std::string logPath = dir + "\\IPMsgPro\\ipmsg_gui_debug.log";
-        CreateDirectoryA((dir + "\\IPMsgPro").c_str(), nullptr);
+        // Use USERPROFILE\.ipmsgpro for debug log (same as data directory)
+        char userProfile[MAX_PATH] = {};
+        if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) <= 0) {
+            SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, userProfile);
+        }
+        std::string dir = std::string(userProfile) + "\\.ipmsgpro";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        std::string logPath = dir + "\\ipmsg_gui_debug.log";
         
         std::ofstream log(logPath, std::ios::app);
         if (log.is_open()) {

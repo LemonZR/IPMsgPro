@@ -74,12 +74,16 @@ private:
     // --- Helper: Find user by IP or key ---
     std::optional<UserInfo> FindUserFromArgs(const nlohmann::json& args);
 
+    /// Get the effective data directory (custom or default)
+    std::string GetDataDir() const;
+
 private:
     tauricpp::Bridge* bridge_ = nullptr;
     MsgMng* msgMng_ = nullptr;
     MessageDB* msgDb_ = nullptr;
     FileTransferManager* fileTransfer_ = nullptr;
     void* hwnd_ = nullptr;  // Main window handle for dialogs (cast to HWND in cpp)
+    std::string dataDir_;   // Custom data directory (empty = use default)
 };
 
 } // namespace ipmsg

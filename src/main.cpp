@@ -69,16 +69,16 @@ static ipmsg::MessageDB* g_msgDb = nullptr;
 static ipmsg::FileTransferManager* g_fileTransfer = nullptr;
 
 /// Get the application data directory for storing database etc.
-/// Uses the directory where the executable is located
+/// Uses USERPROFILE\.ipmsgpro (user home directory)
 static std::string GetAppDataDir(int port) {
-    char exePath[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-    std::string dir = std::string(exePath);
-    dir = dir.substr(0, dir.find_last_of('\\'));
+    char userProfile[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) <= 0) {
+        // Fallback to LOCAL_APPDATA if USERPROFILE is not available
+        SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, userProfile);
+    }
+    std::string dir = std::string(userProfile) + "\\.ipmsgpro";
     if (port != ipmsg::IPMSG_DEFAULT_PORT) {
-        dir += "\\IPMsgPro_" + std::to_string(port);
-    } else {
-        dir += "\\IPMsgPro";
+        dir += "_" + std::to_string(port);
     }
     CreateDirectoryA(dir.c_str(), nullptr);
     return dir;
@@ -780,8 +780,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     app.OnSetup([&](tauricpp::App& app) {
         LOG_INFO("App setup callback started");
 
-        // Set main window handle for dialog commands
-        cmdHandler.SetNativeWindowHandle(app.GetWindow().GetHwnd());
+        // Set main window handle AFTER the native window is created
+        // (OnSetup is called before Window::Run which creates the native window)
+        app.GetWindow().OnCreated([&](tauricpp::Window& win) {
+            LOG_INFO("Window created, hwnd=" + std::to_string(reinterpret_cast<uintptr_t>(win.GetHwnd())));
+            cmdHandler.SetNativeWindowHandle(win.GetHwnd());
+        });
 
         // Set window close handler
         app.GetWindow().OnClose([&]() -> bool {

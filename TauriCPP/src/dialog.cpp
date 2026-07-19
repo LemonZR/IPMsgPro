@@ -1,5 +1,6 @@
 #include "tauricpp/dialog.hpp"
 #include <shobjidl.h>
+#include <shlobj.h>
 #include <commdlg.h>
 
 #pragma comment(lib, "shell32.lib")
@@ -195,40 +196,30 @@ std::optional<std::string> Dialog::SaveFile(HWND parent, const SaveOptions& opti
 std::optional<std::string> Dialog::PickFolder(HWND parent, const std::string& title) {
     std::optional<std::string> result;
 
+    // Use SHBrowseForFolder for folder selection - simpler and more reliable
+    // than COM IFileOpenDialog in WebView2 callback context
+    std::wstring wTitle = Utf8ToWide(title);
+    
+    // Initialize COM for SHBrowseForFolder (needed for new dialog style)
+    // Only call CoUninitialize if we actually initialized (S_OK),
+    // not if COM was already initialized (S_FALSE)
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    bool needUninitialize = SUCCEEDED(hr);
-
-    IFileOpenDialog* pfd = nullptr;
-    hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
-                          IID_PPV_ARGS(&pfd));
-    if (FAILED(hr)) {
-        if (needUninitialize) CoUninitialize();
-        return result;
-    }
-
-    FILEOPENDIALOGOPTIONS fos;
-    pfd->GetOptions(&fos);
-    fos |= FOS_PICKFOLDERS | FOS_FILEMUSTEXIST;
-    pfd->SetOptions(fos);
-
-    if (!title.empty()) {
-        pfd->SetTitle(Utf8ToWide(title).c_str());
-    }
-
-    hr = pfd->Show(parent);
-    if (SUCCEEDED(hr)) {
-        IShellItem* pItem = nullptr;
-        if (SUCCEEDED(pfd->GetResult(&pItem)) && pItem) {
-            LPWSTR pPath = nullptr;
-            if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pPath))) {
-                result = WideToUtf8(pPath);
-                CoTaskMemFree(pPath);
-            }
-            pItem->Release();
+    bool needUninitialize = (hr == S_OK);  // S_FALSE means already initialized by WebView2
+    
+    BROWSEINFOW bi = {};
+    bi.hwndOwner = parent;
+    bi.lpszTitle = wTitle.empty() ? nullptr : wTitle.c_str();
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+    
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (pidl) {
+        WCHAR path[MAX_PATH] = {};
+        if (SHGetPathFromIDListW(pidl, path)) {
+            result = WideToUtf8(path);
         }
+        CoTaskMemFree(pidl);
     }
 
-    pfd->Release();
     if (needUninitialize) CoUninitialize();
 
     return result;

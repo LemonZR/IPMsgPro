@@ -83,6 +83,8 @@ public:
     bool IsFocused() const;
 
     // ---- 窗口生命周期回调 ----
+    using CreatedCallback = std::function<void(Window&)>;  ///< Window created callback
+    void OnCreated(CreatedCallback cb) { on_created_ = std::move(cb); }
     void OnClose(CloseCallback cb) { on_close_ = std::move(cb); }
     void OnResize(ResizeCallback cb) { on_resize_ = std::move(cb); }
     void OnMinimize(MinimizeCallback cb) { on_minimize_ = std::move(cb); }
@@ -120,6 +122,7 @@ private:
     std::atomic<bool> shutting_down_{false};
 
     // 窗口生命周期回调
+    CreatedCallback on_created_;
     CloseCallback on_close_;
     ResizeCallback on_resize_;
     MinimizeCallback on_minimize_;
@@ -140,6 +143,16 @@ private:
     // 线程安全的JS执行队列
     std::mutex jsQueueMutex_;
     std::queue<std::string> jsQueue_;
+
+    // 异步invoke请求队列（用于阻塞型命令如dialog）
+    struct AsyncInvokeRequest {
+        int id;
+        std::string cmd;
+        std::string args_json;
+    };
+    std::mutex asyncInvokeMutex_;
+    std::queue<AsyncInvokeRequest> asyncInvokeQueue_;
+    void ProcessAsyncInvokeQueue();
 };
 
 } // namespace tauricpp
