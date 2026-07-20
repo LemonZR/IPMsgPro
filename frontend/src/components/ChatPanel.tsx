@@ -1,9 +1,10 @@
 import React, { useRef, useEffect, useState, memo, useCallback } from 'react';
-import { FiImage, FiFile, FiSmile, FiX, FiCheck, FiAlertCircle, FiDownload, FiFolder } from 'react-icons/fi';
+import { FiImage, FiFile, FiSmile, FiX, FiCheck, FiAlertCircle, FiDownload, FiFolder, FiMoreHorizontal, FiTrash2 } from 'react-icons/fi';
 import { useUserStore } from '../stores/userStore';
 import { useMessageStore, PendingFileReceive } from '../stores/messageStore';
 import { Message } from '../types';
 import { invoke } from '../services/bridge';
+import { EMOJIS, buildEmojiMessage, parseEmojiId, emojiStyle, EMOJI_TOKEN_RE } from '../emojiData';
 
 // ============================================================================
 // Send Preview Modal - shown before sending image/file
@@ -90,13 +91,18 @@ export default function ChatPanel() {
   const sendFile = useMessageStore((s) => s.sendFile);
   const sendFileByPath = useMessageStore((s) => s.sendFileByPath);
   const loadHistory = useMessageStore((s) => s.loadHistory);
+  const clearHistory = useMessageStore((s) => s.clearHistory);
   const pendingFileReceives = useMessageStore((s) => s.pendingFileReceives);
   const acceptFileReceive = useMessageStore((s) => s.acceptFileReceive);
   const rejectFileReceive = useMessageStore((s) => s.rejectFileReceive);
 
-  const [inputText, setInputText] = useState('');
+  const [hasInput, setHasInput] = useState(false);
   const messageListRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  // Last caret position inside the editor, so an emoji can be inserted there
+  // even after the editor loses focus to the picker button.
+  const savedRange = useRef<Range | null>(null);
 
   // Send preview state
   const [previewFile, setPreviewFile] = useState<File | null>(null);
@@ -104,6 +110,9 @@ export default function ChatPanel() {
   const [pendingFileName, setPendingFileName] = useState<string>('');
   const [previewMode, setPreviewMode] = useState<'image' | 'file' | null>(null);
   const [previewDataUrl, setPreviewDataUrl] = useState<string | undefined>();
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   const userId = currentUser?.id || '';
 
@@ -129,12 +138,48 @@ export default function ChatPanel() {
     }
   }, [userMessages, currentUserPendingReceives]);
 
+  // ---- Serialize the contentEditable input into the wire format ----
+  // Text nodes are kept verbatim; inline emoji spans become WeChat-style XML;
+  // <br>/block breaks become newlines.
+  const serializeEditor = (): string => {
+    const el = editorRef.current;
+    if (!el) return '';
+    let out = '';
+    el.childNodes.forEach((node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        out += node.textContent || '';
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const elem = node as HTMLElement;
+        const emojiId = elem.dataset.emojiId;
+        if (emojiId) {
+          out += buildEmojiMessage(emojiId);
+        } else if (elem.tagName === 'BR') {
+          out += '\n';
+        } else {
+          out += (elem.textContent || '') + (elem.tagName === 'DIV' || elem.tagName === 'P' ? '\n' : '');
+        }
+      }
+    });
+    return out;
+  };
+
+  const syncHasInput = () => {
+    const el = editorRef.current;
+    if (!el) return setHasInput(false);
+    const hasText = (el.textContent || '').replace(/\s/g, '').length > 0;
+    const hasEmoji = !!el.querySelector('[data-emoji-id]');
+    setHasInput(hasText || hasEmoji);
+  };
+
   // ---- Text send ----
   const handleSend = async () => {
-    if (!inputText.trim() || !currentUser) return;
-    const success = await sendMessage(currentUser.id, inputText.trim());
+    if (!currentUser) return;
+    const content = serializeEditor().replace(/\s+$/g, '');
+    if (!content.trim()) return;
+    const success = await sendMessage(currentUser.id, content);
     if (success) {
-      setInputText('');
+      if (editorRef.current) editorRef.current.innerHTML = '';
+      setHasInput(false);
     }
   };
 
@@ -143,6 +188,51 @@ export default function ChatPanel() {
       e.preventDefault();
       handleSend();
     }
+  };
+
+  // Remember caret position inside the editor for later emoji insertion.
+  const saveSelection = () => {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const r = sel.getRangeAt(0);
+      if (editorRef.current?.contains(r.commonAncestorContainer)) {
+        savedRange.current = r;
+      }
+    }
+  };
+
+  // ---- Emoji: insert inline into the input, not send immediately ----
+  const insertEmoji = (id: string) => {
+    const el = editorRef.current;
+    if (!el) return;
+    el.focus();
+    const sel = window.getSelection();
+    let range: Range;
+    if (savedRange.current && el.contains(savedRange.current.commonAncestorContainer)) {
+      range = savedRange.current;
+    } else {
+      range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+    }
+    range.deleteContents();
+    const span = document.createElement('span');
+    span.setAttribute('data-emoji-id', id);
+    span.setAttribute('contenteditable', 'false');
+    Object.assign(span.style, emojiStyle(id, 18) as CSSStyleDeclaration);
+    range.insertNode(span);
+    const after = document.createRange();
+    after.setStartAfter(span);
+    after.collapse(true);
+    sel?.removeAllRanges();
+    sel?.addRange(after);
+    savedRange.current = after;
+    syncHasInput();
+  };
+
+  const handleSelectEmoji = (id: string) => {
+    insertEmoji(id);
+    // Keep the picker open so multiple emojis can be added; click outside to close.
   };
 
   // ---- Image select & preview ----
@@ -233,6 +323,33 @@ export default function ChatPanel() {
     setPreviewDataUrl(undefined);
   };
 
+  // ---- Drag & drop files onto the chat to trigger a file send ----
+  // Note: in the webview, dropped files have no real filesystem path, so we
+  // route them through the same `previewFile` + SendPreview confirm flow as
+  // the file button (which sends via base64 for content-held files).
+  const handleFileDrop = (e: React.DragEvent) => {
+    setIsDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return; // not a file drag — let default (e.g. text) proceed
+    e.preventDefault();
+    if (!currentUser) return;
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setPreviewFile(file);
+        setPreviewMode('image');
+        setPreviewDataUrl(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      setPreviewFile(file);
+      setPreviewMode('file');
+      setPendingFilePath(null);
+      setPendingFileName(file.name);
+      setPreviewDataUrl(undefined);
+    }
+  };
+
   // ---- File receive handlers ----
   // Stable references so memoized MessageBubble instances don't re-render
   // on unrelated progress updates.
@@ -252,7 +369,21 @@ export default function ChatPanel() {
     : '离线';
 
   return (
-    <div className="flex-1 flex flex-col bg-white">
+    <div
+      className={`flex-1 flex flex-col bg-white relative ${isDragOver ? 'ring-2 ring-inset ring-primary-400' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (e.dataTransfer.types.includes('Files')) setIsDragOver(true);
+      }}
+      onDragLeave={(e) => {
+        // Clear only when the pointer actually leaves the panel (not when
+        // moving onto a child element inside it).
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setIsDragOver(false);
+        }
+      }}
+      onDrop={handleFileDrop}
+    >
       {/* Chat header */}
       <div className="h-14 border-b border-gray-200 flex items-center px-4 shrink-0">
         <div>
@@ -260,6 +391,36 @@ export default function ChatPanel() {
           <p className="text-xs text-gray-400">
             {statusText} · {currentUser.ip}:{currentUser.port}
           </p>
+        </div>
+        <div className="ml-auto relative">
+          <button
+            type="button"
+            title="更多"
+            onClick={() => setShowMoreMenu((v) => !v)}
+            className="w-8 h-8 flex items-center justify-center rounded hover:bg-gray-100 text-gray-600"
+          >
+            <FiMoreHorizontal size={18} />
+          </button>
+          {showMoreMenu && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setShowMoreMenu(false)} />
+              <div className="absolute right-0 mt-1 w-40 bg-white rounded-md shadow-lg border border-gray-200 py-1 z-20">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMoreMenu(false);
+                    if (window.confirm(`确定要清空与 ${currentUser.nickname} 的聊天记录吗？`)) {
+                      clearHistory(userId);
+                    }
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left text-red-600 hover:bg-gray-100"
+                >
+                  <FiTrash2 size={14} />
+                  清空聊天记录
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -283,10 +444,38 @@ export default function ChatPanel() {
       </div>
 
       {/* Input area */}
-      <div className="border-t border-gray-200 shrink-0">
+      <div className="border-t border-gray-200 shrink-0 relative">
+        {/* Emoji picker */}
+        {showEmojiPicker && (
+          <>
+            <div
+              className="fixed inset-0 z-10"
+              onClick={() => setShowEmojiPicker(false)}
+            />
+            <div className="absolute bottom-full left-0 mb-2 w-[30rem] max-h-72 overflow-y-auto
+                            bg-white border border-gray-200 rounded-lg shadow-lg p-2
+                            grid grid-cols-10 gap-1 z-20">
+              {EMOJIS.map((e) => (
+                <button
+                  key={e.id}
+                  title={e.id}
+                  className="p-1 hover:bg-gray-100 rounded transition-colors flex items-center justify-center"
+                  onClick={() => handleSelectEmoji(e.id)}
+                >
+                  <EmojiSprite id={e.id} size={32} />
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
         {/* Toolbar */}
         <div className="flex items-center gap-2 px-4 pt-2">
-          <button className="p-1.5 text-gray-400 hover:text-gray-600 rounded transition-colors" title="表情">
+          <button
+            className={`p-1.5 rounded transition-colors ${showEmojiPicker ? 'text-primary-500 bg-gray-100' : 'text-gray-400 hover:text-gray-600'}`}
+            title="表情"
+            onClick={() => setShowEmojiPicker((v) => !v)}
+          >
             <FiSmile size={18} />
           </button>
           <button
@@ -313,17 +502,21 @@ export default function ChatPanel() {
           />
         </div>
 
-        {/* Text input */}
+        {/* Text input (contentEditable so emoji can be inserted inline at text height) */}
         <div className="px-4 pb-3 pt-1">
-          <textarea
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
+          <div
+            ref={editorRef}
+            contentEditable
+            suppressContentEditableWarning
             onKeyDown={handleKeyDown}
-            placeholder="输入消息，Enter发送，Ctrl+Enter换行"
-            rows={3}
-            className="w-full resize-none text-sm leading-relaxed p-2 rounded border border-gray-200
+            onKeyUp={saveSelection}
+            onMouseUp={saveSelection}
+            onBlur={saveSelection}
+            onInput={syncHasInput}
+            data-placeholder="输入消息，Enter发送，Ctrl+Enter换行"
+            className="chat-editor w-full min-h-[4.5rem] max-h-40 overflow-y-auto text-sm leading-relaxed p-2 rounded border border-gray-200
                        focus:outline-none focus:ring-1 focus:ring-primary-400
-                       placeholder-gray-400"
+                       whitespace-pre-wrap break-words"
           />
           <div className="flex justify-end mt-1">
             <button
@@ -331,7 +524,7 @@ export default function ChatPanel() {
                          hover:bg-primary-600 transition-colors disabled:opacity-50
                          disabled:cursor-not-allowed"
               onClick={handleSend}
-              disabled={!inputText.trim()}
+              disabled={!hasInput}
             >
               发送
             </button>
@@ -389,6 +582,26 @@ const MessageBubble = memo(function MessageBubble({ message, pendingReceives, on
   );
 });
 
+// Split a message that mixes plain text and inline emoji XML tokens into an
+// ordered list of segments for inline rendering.
+function splitInlineContent(content: string): Array<{ type: 'text'; value: string } | { type: 'emoji'; id: string }> {
+  const parts: Array<{ type: 'text'; value: string } | { type: 'emoji'; id: string }> = [];
+  EMOJI_TOKEN_RE.lastIndex = 0;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = EMOJI_TOKEN_RE.exec(content)) !== null) {
+    if (m.index > last) {
+      parts.push({ type: 'text', value: content.slice(last, m.index) });
+    }
+    parts.push({ type: 'emoji', id: m[1] });
+    last = m.index + m[0].length;
+  }
+  if (last < content.length) {
+    parts.push({ type: 'text', value: content.slice(last) });
+  }
+  return parts;
+}
+
 function renderContent(
   message: Message,
   pendingReceives: PendingFileReceive[],
@@ -400,9 +613,40 @@ function renderContent(
       return <ImageContent message={message} pendingReceives={pendingReceives} onAccept={onAccept} onReject={onReject} />;
     case 'file':
       return <FileContent message={message} pendingReceives={pendingReceives} onAccept={onAccept} onReject={onReject} />;
-    default:
-      return <span>{message.content}</span>;
+    default: {
+      const emojiId = parseEmojiId(message.content);
+      if (emojiId) {
+        return <EmojiSprite id={emojiId} size={64} />;
+      }
+      // Mixed message: text with inline emoji tokens.
+      const parts = splitInlineContent(message.content);
+      if (parts.length === 1 && parts[0].type === 'text') {
+        return <span className="whitespace-pre-wrap break-words">{parts[0].value}</span>;
+      }
+      return (
+        <span className="inline-flex flex-wrap items-center whitespace-pre-wrap break-words">
+          {parts.map((p, i) =>
+            p.type === 'text' ? (
+              <span key={i} className="whitespace-pre-wrap break-words">
+                {p.value}
+              </span>
+            ) : (
+              <EmojiSprite key={i} id={p.id} size={18} />
+            )
+          )}
+        </span>
+      );
+    }
   }
+}
+
+// ---- Emoji drawn from the sprite sheet (emoji.png) via background-position ----
+function EmojiSprite({ id, size }: { id: string; size: number }) {
+  const style = emojiStyle(id, size);
+  if (!style) {
+    return <span className="text-gray-400">[emoji:{id}]</span>;
+  }
+  return <span style={style} />;
 }
 
 // ---- Image message with thumbnail + progress ----

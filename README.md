@@ -11,6 +11,7 @@
 - **类微信界面** — 三栏布局：左侧会话列表、中间用户列表、右侧聊天面板
 - **数据持久化** — SQLite 存储消息历史，配置信息本地保存
 - **新消息提示音** — 收到新文字消息或文件接收请求时播放提示音，可在「设置」中开关（提示音已作为资源嵌入 exe，运行时自动提取播放）
+- **表情支持** — 聊天输入框可插入 emoji 表情，基于雪碧图（`emoji.png`）+ 定位数据（`emoji_positon.less`）实现
 
 ## 技术栈
 
@@ -37,6 +38,8 @@ IPMsgPro/
 │       ├── components/    # UI 组件
 │       ├── stores/        # Zustand 状态管理
 │       ├── services/      # 后端桥接服务
+│       ├── assets/        # 静态资源（emoji 雪碧图 emoji.png 与定位样式 emoji_positon.less）
+│       ├── emojiData.ts   # 由 assets/emoji_positon.less 生成的表情数据（scripts/gen_emoji_ts.cjs）
 │       └── types/         # TypeScript 类型定义
 ├── TauriCPP/              # TauriCPP 框架（子模块）
 ├── resources/             # 应用图标、通知提示音(embedded)等资源

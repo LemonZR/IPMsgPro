@@ -91,7 +91,7 @@ interface MessageStore {
   recvMessage: (message: Message) => void;
 
   /** Update transfer progress for a message */
-  updateTransferProgress: (transferId: string, progress: number) => void;
+  updateTransferProgress: (transferId: string, progress: number, isSending: boolean) => void;
 
   /** Load chat history for a user from the backend */
   loadHistory: (userId: string, limit?: number, offset?: number) => Promise<void>;
@@ -457,7 +457,7 @@ updateTransferProgress: (transferId, progress, isSending) => {
     // Once a transfer is finished, ignore any stale progress report (e.g. a
     // resume/GETFILEDATA chunk that restarts at 0%) so it can't downgrade an
     // already-delivered/received message back to 0%.
-    if ((current.status === 'delivered' || current.status === 'received' || current.status === 'read')
+    if (((current.status as string) === 'delivered' || (current.status as string) === 'received' || (current.status as string) === 'read')
         && progress < 100) {
       return {};
     }

@@ -1,6 +1,7 @@
 import React from 'react';
 import { FiMessageSquare, FiUsers, FiSettings } from 'react-icons/fi';
 import { useConfigStore } from '../stores/configStore';
+import { APP_VERSION } from '../types';
 
 export type ViewMode = 'chat' | 'contacts' | 'settings';
 
@@ -10,7 +11,6 @@ interface LeftSidebarProps {
 }
 
 export default function LeftSidebar({ viewMode, onViewChange }: LeftSidebarProps) {
-  const nickname = useConfigStore((s) => s.config.nickname) || '用户';
 
   return (
     <div className="w-[60px] bg-[#2C2C2C] flex flex-col items-center py-4 shrink-0">
@@ -41,13 +41,9 @@ export default function LeftSidebar({ viewMode, onViewChange }: LeftSidebarProps
         />
       </div>
 
-      {/* User avatar */}
-      <div className="w-9 h-9 rounded-full bg-primary-400 flex items-center justify-center cursor-pointer
-                       hover:opacity-80 transition-opacity"
-           title={nickname}>
-        <span className="text-white text-sm font-medium">
-          {nickname.charAt(0).toUpperCase()}
-        </span>
+      {/* Version at bottom */}
+      <div className="mt-auto pt-2 text-[11px] leading-none text-gray-500 select-none" title="倍信 (IPMsg Pro)">
+        v{APP_VERSION}
       </div>
     </div>
   );

@@ -65,3 +65,18 @@ html, body, #root {
          focus:outline-none focus:ring-1 focus:ring-primary-400
          placeholder-gray-400;
 }
+
+/* ContentEditable chat input placeholder + inline emoji chips */
+.chat-editor:empty:before {
+  content: attr(data-placeholder);
+  color: #9ca3af;
+  pointer-events: none;
+}
+
+.chat-editor [data-emoji-id] {
+  margin: 0 1px;
+}
+
+.chat-editor [data-emoji-id] + [data-emoji-id] {
+  margin-left: 1px;
+}
