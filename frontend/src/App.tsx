@@ -16,7 +16,6 @@ function App() {
   const loadConfig = useConfigStore((s) => s.loadConfig);
   const currentUser = useUserStore((s) => s.currentUser);
   const loadLocalUserId = useMessageStore((s) => s.loadLocalUserId);
-  const messageVersion = useMessageStore((s) => s.messageVersion);
 
   console.log('[App] Rendering, initMessageListeners type:', typeof initMessageListeners);
 
@@ -51,8 +50,11 @@ function App() {
     };
   }, []);
 
-  // Force ChatPanel to remount when currentUser changes or new messages arrive
-  const chatKey = currentUser ? `${currentUser.id}-${messageVersion}` : 'empty';
+  // Only remount ChatPanel when the active conversation (user) changes.
+  // Progress updates bump messageVersion, but we must NOT remount here,
+  // otherwise useEffect(loadHistory) re-runs and replaces in-memory transfer
+  // progress (causing the whole chat to flicker and progress to reset to 0%).
+  const chatKey = currentUser ? currentUser.id : 'empty';
 
   return (
     <div className="flex h-screen w-screen bg-gray-100">

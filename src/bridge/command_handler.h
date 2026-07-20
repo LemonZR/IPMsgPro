@@ -77,6 +77,7 @@ private:
 
     // --- Dialog Commands ---
     nlohmann::json HandleDialogPickFolder(const nlohmann::json& args);
+    nlohmann::json HandleDialogOpen(const nlohmann::json& args);
 
     // --- Helper: Convert UserInfo to JSON ---
     static nlohmann::json UserToJson(const UserInfo& user);

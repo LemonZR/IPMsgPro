@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "msgmng.h"
+#include "logger.h"
 #include <algorithm>
 #include <sstream>
 #include <chrono>
@@ -24,45 +25,10 @@
 namespace ipmsg {
 
 // ============================================================================
-// Logger (shared with main.cpp pattern)
+// Logger (unified into ipmsg_gui_debug.log via logger.h)
 // ============================================================================
-static std::ofstream s_logFile;
-static std::mutex s_logMutex;
-static bool s_logInitialized = false;
-
-static void EnsureLogInit() {
-    if (s_logInitialized) return;
-    s_logInitialized = true;
-    
-    char path[MAX_PATH] = {};
-    if (GetEnvironmentVariableA("USERPROFILE", path, MAX_PATH) <= 0) {
-        SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path);
-    }
-    std::string dir = std::string(path) + "\\.ipmsgpro";
-    CreateDirectoryA(dir.c_str(), nullptr);
-    s_logFile.open(dir + "\\msgmng.log", std::ios::app);
-}
-
-static std::string GetLogTimestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()) % 1000;
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&time), "%H:%M:%S");
-    ss << '.' << std::setfill('0') << std::setw(3) << ms.count();
-    return ss.str();
-}
-
 static void MsgLog(const std::string& msg) {
-    std::lock_guard<std::mutex> lock(s_logMutex);
-    EnsureLogInit();
-    std::string logMsg = "[" + GetLogTimestamp() + "] " + msg + "\n";
-    if (s_logFile.is_open()) {
-        s_logFile << logMsg;
-        s_logFile.flush();
-    }
-    std::cout << logMsg;
+    ipmsg::LogMessage("MSGMNG", "", msg);
 }
 
 // ============================================================================

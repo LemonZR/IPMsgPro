@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, memo, useCallback } from 'react';
 import { FiImage, FiFile, FiSmile, FiX, FiCheck, FiAlertCircle, FiDownload, FiFolder } from 'react-icons/fi';
 import { useUserStore } from '../stores/userStore';
 import { useMessageStore, PendingFileReceive } from '../stores/messageStore';
@@ -11,13 +11,15 @@ import { invoke } from '../services/bridge';
 
 interface SendPreviewProps {
   mode: 'image' | 'file';
-  file: File;
+  file?: File;
+  fileName?: string;
+  fileSize?: number;
   dataUrl?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
-function SendPreview({ mode, file, dataUrl, onConfirm, onCancel }: SendPreviewProps) {
+function SendPreview({ mode, file, fileName, fileSize, dataUrl, onConfirm, onCancel }: SendPreviewProps) {
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center"
       onClick={onCancel}>
@@ -47,8 +49,8 @@ function SendPreview({ mode, file, dataUrl, onConfirm, onCancel }: SendPreviewPr
             <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
               <FiFile size={28} className="text-gray-400 shrink-0" />
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-gray-800 truncate">{file.name}</p>
-                <p className="text-xs text-gray-400">{formatFileSize(file.size)}</p>
+                <p className="text-sm font-medium text-gray-800 truncate">{file?.name ?? fileName ?? ''}</p>
+                <p className="text-xs text-gray-400">{formatFileSize(file?.size ?? fileSize ?? 0)}</p>
               </div>
             </div>
           )}
@@ -86,6 +88,7 @@ export default function ChatPanel() {
   const sendMessage = useMessageStore((s) => s.sendMessage);
   const sendImage = useMessageStore((s) => s.sendImage);
   const sendFile = useMessageStore((s) => s.sendFile);
+  const sendFileByPath = useMessageStore((s) => s.sendFileByPath);
   const loadHistory = useMessageStore((s) => s.loadHistory);
   const pendingFileReceives = useMessageStore((s) => s.pendingFileReceives);
   const acceptFileReceive = useMessageStore((s) => s.acceptFileReceive);
@@ -93,11 +96,12 @@ export default function ChatPanel() {
 
   const [inputText, setInputText] = useState('');
   const messageListRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   // Send preview state
   const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const [pendingFilePath, setPendingFilePath] = useState<string | null>(null);
+  const [pendingFileName, setPendingFileName] = useState<string>('');
   const [previewMode, setPreviewMode] = useState<'image' | 'file' | null>(null);
   const [previewDataUrl, setPreviewDataUrl] = useState<string | undefined>();
 
@@ -105,7 +109,6 @@ export default function ChatPanel() {
 
   // Get messages for current user
   const userMessages = useMessageStore((s) => s.messages.get(userId)) || [];
-  console.log(`[ChatPanel] userId=${userId}, messages count=${userMessages.length}, messageVersion=${useMessageStore.getState().messageVersion}`);
 
   // Get pending receives for current user
   const currentUserPendingReceives = pendingFileReceives.filter(
@@ -180,33 +183,48 @@ export default function ChatPanel() {
   };
 
   // ---- File select & preview ----
-  const handleFileClick = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setPreviewFile(file);
-    setPreviewMode('file');
-    setPreviewDataUrl(undefined);
-    e.target.value = '';
+  // 使用原生文件对话框直接拿到真实路径，避免前端 base64 编码 + 复制到临时文件夹（大文件极慢）
+  const handleFileClick = async () => {
+    if (!currentUser) return;
+    try {
+      const res = await invoke<{ success?: boolean; files?: string[] }>('dialog.open', {
+        title: '选择要发送的文件',
+        multi_select: false,
+      });
+      if (res && res.success && res.files && res.files.length > 0) {
+        const fp = res.files[0];
+        const name = fp.split(/[\\/]/).pop() || fp;
+        setPendingFilePath(fp);
+        setPendingFileName(name);
+        setPreviewMode('file');
+        setPreviewFile(null);
+        setPreviewDataUrl(undefined);
+      }
+    } catch (e) {
+      console.error('[ChatPanel] dialog.open failed', e);
+    }
   };
 
   const handleFileSend = async () => {
-    if (!previewFile || !currentUser) return;
+    if (!currentUser) return;
 
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = (reader.result as string).split(',')[1];
+    if (pendingFilePath) {
+      await sendFileByPath(currentUser.id, pendingFilePath);
+    } else if (previewFile) {
+      // 图片等仍走 base64（体积较小）
+      const base64 = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(previewFile);
+      });
       await sendFile(currentUser.id, base64, previewFile.name);
+    }
 
-      setPreviewFile(null);
-      setPreviewMode(null);
-      setPreviewDataUrl(undefined);
-    };
-    reader.readAsDataURL(previewFile);
+    setPendingFilePath(null);
+    setPendingFileName('');
+    setPreviewFile(null);
+    setPreviewMode(null);
+    setPreviewDataUrl(undefined);
   };
 
   const handlePreviewCancel = () => {
@@ -216,14 +234,16 @@ export default function ChatPanel() {
   };
 
   // ---- File receive handlers ----
-  const handleAcceptFile = (requestId: string) => {
+  // Stable references so memoized MessageBubble instances don't re-render
+  // on unrelated progress updates.
+  const handleAcceptFile = useCallback((requestId: string) => {
     // Pass empty savePath, backend will auto-generate using Downloads folder
     acceptFileReceive(requestId, '');
-  };
+  }, [acceptFileReceive]);
 
-  const handleRejectFile = (requestId: string) => {
+  const handleRejectFile = useCallback((requestId: string) => {
     rejectFileReceive(requestId);
-  };
+  }, [rejectFileReceive]);
 
   if (!currentUser) return null;
 
@@ -291,12 +311,6 @@ export default function ChatPanel() {
             className="hidden"
             onChange={handleImageSelected}
           />
-          <input
-            ref={fileInputRef}
-            type="file"
-            className="hidden"
-            onChange={handleFileSelected}
-          />
         </div>
 
         {/* Text input */}
@@ -326,10 +340,12 @@ export default function ChatPanel() {
       </div>
 
       {/* Send preview modal */}
-      {previewMode && previewFile && (
+      {previewMode && (previewFile || pendingFilePath) && (
         <SendPreview
           mode={previewMode}
-          file={previewFile}
+          file={previewFile ?? undefined}
+          fileName={pendingFileName}
+          fileSize={0}
           dataUrl={previewDataUrl}
           onConfirm={previewMode === 'image' ? handleImageSend : handleFileSend}
           onCancel={handlePreviewCancel}
@@ -350,7 +366,7 @@ interface MessageBubbleProps {
   onReject: (requestId: string) => void;
 }
 
-function MessageBubble({ message, pendingReceives, onAccept, onReject }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, pendingReceives, onAccept, onReject }: MessageBubbleProps) {
   const isSelf = message.from === 'self';
 
   return (
@@ -371,7 +387,7 @@ function MessageBubble({ message, pendingReceives, onAccept, onReject }: Message
       </div>
     </div>
   );
-}
+});
 
 function renderContent(
   message: Message,

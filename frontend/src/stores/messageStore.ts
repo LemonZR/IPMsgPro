@@ -21,6 +21,41 @@ export interface PendingFileReceive {
   timestamp: number;
 }
 
+/**
+ * Locate the message that a file-transfer event (progress/completion) belongs to.
+ * First try exact transferId match (message id or fileInfo.transferId). As a
+ * fallback for the SENDER side, match the locally-initiated file/image message
+ * that is still in progress, so progress still updates even if transferId
+ * mismatches for any reason.
+ */
+function locateTransferMessage(
+  messages: Map<string, Message[]>,
+  transferId: string | undefined,
+  isSending?: boolean
+): { userId: string; idx: number } | null {
+  if (transferId) {
+    for (const [userId, msgs] of messages) {
+      const idx = msgs.findIndex(
+        (m) => m.fileInfo?.transferId === transferId || m.id === transferId
+      );
+      if (idx >= 0) return { userId, idx };
+    }
+  }
+  if (isSending) {
+    for (const [userId, msgs] of messages) {
+      const idx = msgs.findIndex(
+        (m) =>
+          m.from === 'self' &&
+          (m.type === 'file' || m.type === 'image') &&
+          m.status === 'sending' &&
+          (m.transferProgress === undefined || m.transferProgress < 100)
+      );
+      if (idx >= 0) return { userId, idx };
+    }
+  }
+  return null;
+}
+
 interface MessageStore {
   /** Map of userId -> messages array */
   messages: Map<string, Message[]>;
@@ -41,8 +76,10 @@ interface MessageStore {
   /** Send an image to a user */
   sendImage: (target: string, base64Data: string, filename: string) => Promise<boolean>;
 
-  /** Send a file to a user */
+  /** Send a file to a user (via base64 + temp copy) */
   sendFile: (target: string, base64Data: string, filename: string) => Promise<boolean>;
+  /** Send a file to a user using a real file path (no base64/temp copy, fast for large files) */
+  sendFileByPath: (target: string, filePath: string) => Promise<boolean>;
 
   /** Accept a file receive request */
   acceptFileReceive: (requestId: string, savePath: string) => Promise<boolean>;
@@ -215,6 +252,42 @@ export const useMessageStore = create<MessageStore>((set, get) => ({
     }
   },
 
+  sendFileByPath: async (target, filePath) => {
+    console.log(`[FILE_SEND_PATH] target=${target}, filePath=${filePath}`);
+    try {
+      const result = await invoke<{ success: boolean; transferId?: string; fileName?: string; fileSize?: number; error?: string }>(
+        'file.send',
+        { target, filePath }
+      );
+      if (result.success) {
+        const displayName = result.fileName || filePath.split(/[\\/]/).pop() || filePath;
+        const msg: Message = {
+          id: result.transferId || Date.now().toString(),
+          from: 'self',
+          to: target,
+          content: displayName,
+          type: 'file',
+          timestamp: Date.now(),
+          status: 'sending',
+          fileInfo: {
+            fileName: displayName,
+            fileSize: result.fileSize || 0,
+            filePath,
+            transferId: result.transferId,
+          },
+          transferProgress: 0,
+        };
+        get().recvMessage(msg);
+        return true;
+      }
+      console.error('[FILE_SEND_PATH] failed:', result.error);
+      return false;
+    } catch (err) {
+      console.error('sendFileByPath error:', err);
+      return false;
+    }
+  },
+
   acceptFileReceive: async (requestId, savePath) => {
     console.log(`[ACCEPT_FILE] requestId=${requestId}, savePath=${savePath}`);
     const request = get().pendingFileReceives.find(r => r.id === requestId);
@@ -375,33 +448,34 @@ export const useMessageStore = create<MessageStore>((set, get) => ({
     });
   },
 
-  updateTransferProgress: (transferId, progress) => {
-    set((state) => {
-      const newMessages = new Map(state.messages);
-      let changed = false;
-      for (const [userId, msgs] of newMessages) {
-        const idx = msgs.findIndex(
-          m => m.fileInfo?.transferId === transferId || m.id === transferId
-        );
-        if (idx >= 0) {
-          const oldProgress = msgs[idx].transferProgress;
-          // Only update if progress changed significantly (>1%) or reached 0/100
-          const shouldUpdate = progress === 0 || progress === 100 ||
-            (oldProgress === undefined || oldProgress === -1) ||
-            Math.abs(progress - oldProgress) >= 1;
-          if (shouldUpdate) {
-            const updated = [...msgs];
-            updated[idx] = {
-              ...updated[idx],
-              transferProgress: progress,
-              status: progress >= 100 ? 'delivered' : updated[idx].status,
-            };
-            newMessages.set(userId, updated);
-            changed = true;
-          }
-        }
-      }
-      return changed ? { messages: newMessages, messageVersion: state.messageVersion + 1 } : state;
+updateTransferProgress: (transferId, progress, isSending) => {
+  set((state) => {
+    const loc = locateTransferMessage(state.messages, transferId, isSending);
+    if (!loc) return {};
+    const msgs = state.messages.get(loc.userId)!;
+    const current = msgs[loc.idx];
+    // Once a transfer is finished, ignore any stale progress report (e.g. a
+    // resume/GETFILEDATA chunk that restarts at 0%) so it can't downgrade an
+    // already-delivered/received message back to 0%.
+    if ((current.status === 'delivered' || current.status === 'received' || current.status === 'read')
+        && progress < 100) {
+      return {};
+    }
+    const newMessages = new Map(state.messages);
+    const oldProgress = msgs[loc.idx].transferProgress;
+      // Only update if progress changed significantly (>1%) or reached 0/100
+      const shouldUpdate = progress === 0 || progress === 100 ||
+        (oldProgress === undefined || oldProgress === -1) ||
+        Math.abs(progress - oldProgress) >= 1;
+      if (!shouldUpdate) return {};
+      const updated = [...msgs];
+      updated[loc.idx] = {
+        ...updated[loc.idx],
+        transferProgress: progress,
+        status: progress >= 100 ? 'delivered' : updated[loc.idx].status,
+      };
+      newMessages.set(loc.userId, updated);
+      return { messages: newMessages, messageVersion: state.messageVersion + 1 };
     });
   },
 
@@ -483,8 +557,16 @@ export const useMessageStore = create<MessageStore>((set, get) => ({
           // Build a set of message IDs from history
           const historyIds = new Set(msgs.map(m => m.id));
 
-          // Keep real-time messages that are not in history (e.g., pending transfers)
-          const realtimeOnly = existingMsgs.filter(m => !historyIds.has(m.id));
+          // Keep real-time messages that are not in history, plus any in-flight
+          // transfer whose live progress must not be clobbered by the persisted
+          // (possibly 0%) history entry.
+          const realtimeOnly = existingMsgs.filter((m) => {
+            if (!historyIds.has(m.id)) return true;
+            const inFlight = (m.type === 'file' || m.type === 'image') &&
+              m.status === 'sending' &&
+              (m.transferProgress === undefined || m.transferProgress < 100);
+            return inFlight;
+          });
 
           // Combine: history + realtime-only, sorted by timestamp
           const combined = [...msgs, ...realtimeOnly].sort((a, b) => a.timestamp - b.timestamp);
@@ -703,72 +785,35 @@ export const useMessageStore = create<MessageStore>((set, get) => ({
       const progress = data.fileSize > 0
         ? Math.round((data.transferred * 100) / data.fileSize)
         : 0;
-      console.log(`[FILE_PROGRESS] transferId=${data.transferId}, filename=${data.filename}, ${data.transferred}/${data.fileSize} (${progress}%)`);
-      // Debug: log all message transferIds for matching
-      const state = get();
-      for (const [uid, msgs] of state.messages) {
-        for (const m of msgs) {
-          if (m.fileInfo?.transferId) {
-            console.log(`[FILE_PROGRESS] msg: id=${m.id}, fileInfo.transferId=${m.fileInfo.transferId}, match=${m.fileInfo.transferId === data.transferId}`);
-          }
-        }
+      // 节流日志：仅在整数百分比或每 5% 打印，避免大文件海量日志拖垮 UI（整框闪烁的根因）
+      if (progress === 0 || progress === 100 || progress % 5 === 0) {
+        console.log(`[FILE_PROGRESS] transferId=${data.transferId}, ${data.transferred}/${data.fileSize} (${progress}%)`);
       }
-      get().updateTransferProgress(data.transferId, progress);
+      get().updateTransferProgress(data.transferId, progress, data.isSending);
     }));
 
     // Listen for file transfer completion
     unsubs.push(listen('file.transfer_completed', (data: any) => {
-      console.log(`[FILE_COMPLETE] transferId=${data.transferId}, filename=${data.filename}, isSending=${data.isSending}, savePath=${data.savePath || 'N/A'}`);
-      // Debug: log all message transferIds for matching
-      const state = get();
-      for (const [uid, msgs] of state.messages) {
-        for (const m of msgs) {
-          if (m.fileInfo?.transferId) {
-            console.log(`[FILE_COMPLETE] msg: id=${m.id}, fileInfo.transferId=${m.fileInfo.transferId}, match=${m.fileInfo.transferId === data.transferId}`);
-          }
-        }
-      }
-      get().updateTransferProgress(data.transferId, 100);
+      console.log(`[FILE_COMPLETE] transferId=${data.transferId}, isSending=${data.isSending}, savePath=${data.savePath || 'N/A'}`);
+      get().updateTransferProgress(data.transferId, 100, data.isSending);
 
       // Update the message with save path for received files
       if (!data.isSending && data.savePath) {
         set((state) => {
+          const loc = locateTransferMessage(state.messages, data.transferId, data.isSending);
+          if (!loc) return {};
           const newMessages = new Map(state.messages);
-          for (const [userId, msgs] of newMessages) {
-            const idx = msgs.findIndex(
-              m => m.fileInfo?.transferId === data.transferId
-            );
-            if (idx >= 0) {
-              const updated = [...msgs];
-              updated[idx] = {
-                ...updated[idx],
-                status: 'delivered',
-                transferProgress: 100,
-                fileInfo: updated[idx].fileInfo
-                  ? { ...updated[idx].fileInfo!, filePath: data.savePath }
-                  : { fileName: data.filename || '', fileSize: 0, filePath: data.savePath },
-              };
-              newMessages.set(userId, updated);
-              break;
-            }
-          }
-          return { messages: newMessages, messageVersion: state.messageVersion + 1 };
-        });
-      } else if (data.isSending) {
-        // Mark sent file as delivered
-        set((state) => {
-          const newMessages = new Map(state.messages);
-          for (const [userId, msgs] of newMessages) {
-            const idx = msgs.findIndex(
-              m => m.fileInfo?.transferId === data.transferId
-            );
-            if (idx >= 0) {
-              const updated = [...msgs];
-              updated[idx] = { ...updated[idx], status: 'delivered', transferProgress: 100 };
-              newMessages.set(userId, updated);
-              break;
-            }
-          }
+          const msgs = newMessages.get(loc.userId)!;
+          const updated = [...msgs];
+          updated[loc.idx] = {
+            ...updated[loc.idx],
+            status: 'delivered',
+            transferProgress: 100,
+            fileInfo: updated[loc.idx].fileInfo
+              ? { ...updated[loc.idx].fileInfo!, filePath: data.savePath }
+              : { fileName: data.filename || '', fileSize: 0, filePath: data.savePath },
+          };
+          newMessages.set(loc.userId, updated);
           return { messages: newMessages, messageVersion: state.messageVersion + 1 };
         });
       }

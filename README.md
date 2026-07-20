@@ -1,4 +1,4 @@
-# 倍信 (IPMsg Pro) v1.1.0
+# 倍信 (IPMsg Pro) v1.2.0
 
 基于 [TauriCPP](https://github.com/masonwu21/TauriCPP) 框架和 [ipmsg-master](https://ipmsg.org/) 协议实现的局域网即时通讯应用，兼容飞秋和IPMsg v3.0 协议（UDP 2425 端口）。
 
@@ -96,7 +96,20 @@ cmake --build build_x86 --config Release
 - `IPMSG_SENDMSG` / `IPMSG_RECVMSG` / `IPMSG_FILEATTACHOPT` 等标准命令
 - 文件接收确认流程（`IPMSG_GETFILEDATA` / `IPMSG_RELEASEFILES`）
 - 飞秋协议兼容：GBK/UTF-8 编码自动转换、无 `\0` 分隔符的 GETFILEDATA 解析、扩展版本号格式
-- 文件传输进度实时显示，支持打开接收文件所在文件夹
+- 文件传输进度实时显示，发送完成后进度保持在 100% 并显示「发送成功」，支持打开接收文件所在文件夹
+
+## 更新日志
+
+### v1.2.0
+- **文件传输进度显示优化**
+  - 发送/接收过程中只更新对应气泡的进度条，不再整体刷新整个对话列表（解决对话记录不断闪烁的问题）
+  - 发送完成后进度条保持在 100%，不再回落到 0%
+  - 兼容飞秋分片/续传（GETFILEDATA）请求，避免续传重新从 0% 上报导致进度归零
+- **统一日志系统**
+  - 将原先分散的 `ipmsgpro.log`、`msgmng.log` 与 `ipmsg_gui_debug.log` 合并为单一文件 `ipmsg_gui_debug.log`
+  - `std::cout` / `std::cerr` 的输出也重定向进该文件
+  - 文件在每次启动应用时清空重建，日志按 `[时间] [模块] [级别] 消息` 格式输出（`IPMSGPRO` / `MSGMNG` / `FILE_XFER` / `BRIDGE` 标签区分来源）
+  - 日志目录：`%LOCALAPPDATA%\.ipmsgpro\ipmsg_gui_debug.log`（默认端口；自定义端口为 `.ipmsgpro_<端口>`）
 
 ## License
 

@@ -14,6 +14,7 @@
 
 #include "command_handler.h"
 #include "ipmsg/protocol.h"
+#include "logger.h"
 #include "../resources/resource.h"
 #include <ctime>
 #include <random>
@@ -52,6 +53,32 @@ static std::string GbkToUtf8(const std::string& gbk) {
     return utf8;
 }
 
+// UTF-8 -> GBK (本地代码页)。用于把内部 UTF-8 文件名转换为 IPMsg/FeiQ 协议层所需的
+// ANSI/GBK 字节，否则对方的飞秋/原生 UI 会把 UTF-8 字节当成 GBK 解码产生乱码。
+static std::string Utf8ToGbk(const std::string& utf8) {
+    if (utf8.empty()) return utf8;
+    bool isAscii = true;
+    for (unsigned char c : utf8) {
+        if (c >= 0x80) { isAscii = false; break; }
+    }
+    if (isAscii) return utf8;
+
+    // UTF-8 -> UTF-16
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return utf8;
+    std::wstring wstr(wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wstr[0], wlen);
+
+    // UTF-16 -> GBK
+    int glen = WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (glen <= 0) return utf8;
+    std::string gbk(glen, '\0');
+    WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), -1, &gbk[0], glen, nullptr, nullptr);
+    if (!gbk.empty() && gbk.back() == '\0') gbk.pop_back();
+
+    return gbk;
+}
+
 static bool IsValidUtf8(const std::string& str) {
     // Quick check: if all bytes are ASCII, it's valid UTF-8
     bool hasNonAscii = false;
@@ -88,25 +115,7 @@ namespace ipmsg {
 namespace {
     // Simple file logger for debugging GUI message flow
     void WriteDebugLog(const std::string& msg) {
-        // Use USERPROFILE\.ipmsgpro for debug log (same as data directory)
-        char userProfile[MAX_PATH] = {};
-        if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) <= 0) {
-            SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, userProfile);
-        }
-        std::string dir = std::string(userProfile) + "\\.ipmsgpro";
-        CreateDirectoryA(dir.c_str(), nullptr);
-        std::string logPath = dir + "\\ipmsg_gui_debug.log";
-        
-        std::ofstream log(logPath, std::ios::app);
-        if (log.is_open()) {
-            auto now = std::chrono::system_clock::now();
-            auto tt = std::chrono::system_clock::to_time_t(now);
-            char buf[32] = {};
-            tm local = {};
-            localtime_s(&local, &tt);
-            strftime(buf, sizeof(buf), "%H:%M:%S", &local);
-            log << "[" << buf << "] " << msg << std::endl;
-        }
+        ipmsg::LogMessage("BRIDGE", "", msg);
     }
 
     // Extract embedded notification.mp3 resource to a temp file (once) and return its path
@@ -254,6 +263,8 @@ void CommandHandler::RegisterAllCommands() {
     // Dialog
     bridge_->RegisterCommand("dialog.pick_folder",
         [this](const nlohmann::json& args) { return HandleDialogPickFolder(args); });
+    bridge_->RegisterCommand("dialog.open",
+        [this](const nlohmann::json& args) { return HandleDialogOpen(args); });
 
 }
 
@@ -366,6 +377,13 @@ void CommandHandler::SetupEventForwarding() {
 
             // Only handle SENDMSG from here onwards
             if (mode != IPMSG_SENDMSG) return;
+
+            // Ignore our own broadcasted messages. The sender's own socket also
+            // receives the SENDMSG it broadcasts, which would otherwise create a
+            // spurious incoming "file receive request" for our own outgoing file.
+            if (msg.sender.Key() == msgMng_->GetLocalUser().Key()) {
+                return;
+            }
 
             // Ensure all sender fields are UTF-8 (FeiQ may send GBK even without UTF8OPT flag)
             auto& sender = const_cast<UserInfo&>(msg.sender);
@@ -552,7 +570,8 @@ void CommandHandler::SetupEventForwarding() {
                     {"fromUser", msg.sender.Key()},
                     {"fromUserIp", msg.sender.ipAddress},
                     {"fromUserPort", msg.sender.portNo},
-                    {"fileName", fileName},
+                    // 接收方文件名来自协议（GBK），转 UTF-8 供前端正确显示
+                    {"fileName", EnsureUtf8(fileName)},
                     {"fileSize", fileSize},
                     {"fileId", fileId},
                     {"transferId", std::to_string(msg.packetNo)}
@@ -736,7 +755,8 @@ nlohmann::json CommandHandler::HandleMessageSendImage(const nlohmann::json& args
     // Build file attach info for IPMsg protocol (Feiq format):
     // "fileId:filename:hexSize:hexMtime:hexFileType:\a"
     std::ostringstream attachOs;
-    std::string escapedFileName = fileInfo->fileName;
+    // 协议层文件名必须是 GBK（飞秋/原生 UI 按 ANSI 解析），内部 fileInfo->fileName 是 UTF-8
+    std::string escapedFileName = Utf8ToGbk(fileInfo->fileName);
     // Escape colons in filename (:: represents a literal colon)
     {
         std::string escaped;
@@ -841,7 +861,8 @@ nlohmann::json CommandHandler::HandleFileSend(const nlohmann::json& args) {
     // Build file attach info for IPMsg protocol (Feiq format):
     // "fileId:filename:hexSize:hexMtime:hexFileType:\a"
     std::ostringstream attachOs;
-    std::string escapedFileName = fileInfo->fileName;
+    // 协议层文件名必须是 GBK（飞秋/原生 UI 按 ANSI 解析），内部 fileInfo->fileName 是 UTF-8
+    std::string escapedFileName = Utf8ToGbk(fileInfo->fileName);
     // Escape colons in filename (:: represents a literal colon)
     {
         std::string escaped;
@@ -883,7 +904,8 @@ nlohmann::json CommandHandler::HandleFileSend(const nlohmann::json& args) {
               << " (fileId=" << fileInfo->fileId << ", fileSize=" << fileInfo->fileSize << ")" << std::endl;
     std::cout << "[BACKEND-SEND] File attach info: " << fileAttachInfo << std::endl;
     
-    uint64_t sentPktNo = msgMng_->SendMessageWithFile(*target, "[File: " + fileInfo->fileName + "]", fileAttachInfo, IPMSG_SENDCHECKOPT);
+    // 通知消息文本里的文件名也用 GBK，避免飞秋消息列表里乱码
+    uint64_t sentPktNo = msgMng_->SendMessageWithFile(*target, "[File: " + Utf8ToGbk(fileInfo->fileName) + "]", fileAttachInfo, IPMSG_SENDCHECKOPT);
 
     if (sentPktNo > 0) {
         std::cout << "[BACKEND-SEND] SENDMSG sent successfully, packetNo=" << sentPktNo << std::endl;
@@ -1315,6 +1337,32 @@ nlohmann::json CommandHandler::HandleDialogPickFolder(const nlohmann::json& args
     }
     return {{"success", true}, {"folder", ""}};  // User cancelled
 }
+
+nlohmann::json CommandHandler::HandleDialogOpen(const nlohmann::json& args) {
+    std::string title = args.value("title", "选择文件");
+    bool multi = args.value("multi_select", false);
+    WriteDebugLog("[DIALOG] HandleDialogOpen called, title=" + title);
+
+    if (!hwnd_) {
+        WriteDebugLog("[DIALOG] ERROR: hwnd_ is null!");
+        return {{"success", false}, {"error", "Window handle not available"}};
+    }
+
+    HWND hWnd = static_cast<HWND>(hwnd_);
+    tauricpp::Dialog::OpenOptions opts;
+    opts.title = title;
+    opts.multi_select = multi;
+    if (args.contains("default_path") && args["default_path"].is_string()) {
+        opts.default_path = args["default_path"].get<std::string>();
+    }
+
+    // 返回 UTF-8 路径，后端的 StartSendFile 用 fs::u8path 正确解析中文路径
+    auto files = tauricpp::Dialog::OpenFile(hWnd, opts);
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& f : files) arr.push_back(f);
+    return {{"success", true}, {"files", arr}};
+}
+
 
 std::string CommandHandler::GetDataDir() const {
     // If custom dataDir is set, use it; otherwise use default (USERPROFILE\.ipmsgpro)

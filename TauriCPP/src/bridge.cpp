@@ -72,9 +72,19 @@ void Bridge::Emit(const std::string& event, const nlohmann::json& data) {
     nlohmann::json callArgs;
     callArgs["event"] = event;
     callArgs["data"] = data;
-    std::string js = "__tauricpp_internal_emit(" + callArgs.dump() + ");";
 
-    std::cout << "[Bridge::Emit] event=" << event << ", data=" << data.dump().substr(0, 100) << ", js_len=" << js.size() << std::endl;
+    // ★ 关键修复：使用 replace 错误处理器，避免文件名等含非UTF-8字节（如GBK中文路径）
+    // 时 dump() 抛 type_error.316 异常，导致 cb(js) 永不执行、前端收不到事件（进度条卡0%的根因）。
+    // （HandleInvoke 路径已用此方式，Emit 路径此前遗漏）
+    std::string js;
+    try {
+        js = "__tauricpp_internal_emit(" + callArgs.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + ");";
+    } catch (const std::exception& e) {
+        std::cout << "[Bridge::Emit] dump failed for event=" << event << ": " << e.what() << std::endl;
+        return;
+    }
+
+    std::cout << "[Bridge::Emit] event=" << event << ", js_len=" << js.size() << std::endl;
     cb(js);
 }
 

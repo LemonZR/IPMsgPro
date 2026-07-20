@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(IPMsgPro VERSION 1.1.0 LANGUAGES CXX C)
+project(IPMsgPro VERSION 1.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -178,6 +178,7 @@ endif()
 # ============================================================================
 set(IPMSGPRO_SOURCES
     src/main.cpp
+    src/logger.cpp
     src/ipmsg/msgmng.cpp
     src/ipmsg/network.cpp
     src/bridge/command_handler.cpp

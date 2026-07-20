@@ -31,31 +31,12 @@
 #include <nlohmann/json.hpp>
 
 // ============================================================================
-// Logger
+// Logger (unified into ipmsg_gui_debug.log via logger.h)
 // ============================================================================
-static std::ofstream g_logFile;
-static std::mutex g_logMutex;
-
-static std::string GetTimestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()) % 1000;
-    
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
-    ss << '.' << std::setfill('0') << std::setw(3) << ms.count();
-    return ss.str();
-}
+#include "logger.h"
 
 static void Log(const std::string& level, const std::string& msg) {
-    std::lock_guard<std::mutex> lock(g_logMutex);
-    std::string logMsg = "[IPMSGPRO] [" + GetTimestamp() + "] [" + level + "] " + msg;
-    std::cout << logMsg << std::endl;
-    if (g_logFile.is_open()) {
-        g_logFile << logMsg << std::endl;
-        g_logFile.flush();
-    }
+    ipmsg::LogMessage("IPMSGPRO", level, msg);
 }
 
 #define LOG_INFO(msg) Log("INFO", msg)
@@ -667,17 +648,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         setvbuf(stderr, nullptr, _IONBF, 0);
     }
 
-    // Initialize logger
+    // Initialize unified logger (fresh ipmsg_gui_debug.log, redirect cout/cerr)
     std::string dataDir = GetAppDataDir(cliArgs.port);
-    std::string logPath = dataDir + "\\ipmsgpro.log";
-    g_logFile.open(logPath, std::ios::app);
-    if (!g_logFile.is_open()) {
-        std::cerr << "Failed to open log file: " << logPath << std::endl;
-    }
-    
+    ipmsg::InitLogger(dataDir);
+
     LOG_INFO("========================================");
     LOG_INFO("IPMsgPro starting...");
-    LOG_INFO("Log file: " + logPath);
+    LOG_INFO("Unified log: " + dataDir + "\\ipmsg_gui_debug.log");
     LOG_INFO("Port: " + std::to_string(cliArgs.port));
     if (cliArgs.cliMode) {
         LOG_INFO("Mode: CLI (" + cliArgs.subCmd + ")");
@@ -746,7 +723,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         delete g_msgDb;
         delete g_msgMng;
         ipmsg::WSACleanup();
-        if (g_logFile.is_open()) g_logFile.close();
+        ipmsg::ShutdownLogger();
         return 0;
     }
 
@@ -875,9 +852,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
 
     LOG_INFO("Cleanup complete, exiting.");
     
-    if (g_logFile.is_open()) {
-        g_logFile.close();
-    }
+    ipmsg::ShutdownLogger();
 
     return result;
 }

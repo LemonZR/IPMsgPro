@@ -6,6 +6,7 @@
 
 #include "file_transfer.h"
 #include "ipmsg/protocol.h"
+#include "logger.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -22,23 +23,7 @@
 
 namespace {
     void WriteTransferLog(const std::string& msg) {
-        // Use USERPROFILE\.ipmsgpro for debug log (same as data directory)
-        char userProfile[MAX_PATH] = {};
-        if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) <= 0) {
-            SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, userProfile);
-        }
-        std::string dir = std::string(userProfile) + "\\.ipmsgpro";
-        CreateDirectoryA(dir.c_str(), nullptr);
-        std::string logPath = dir + "\\ipmsg_gui_debug.log";
-        
-        std::ofstream log(logPath, std::ios::app);
-        if (log.is_open()) {
-            auto now = std::chrono::system_clock::now();
-            std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
-            char timeBuf[32];
-            strftime(timeBuf, sizeof(timeBuf), "[%H:%M:%S] ", std::localtime(&nowTime));
-            log << timeBuf << "[FILE_XFER] " << msg << std::endl;
-        }
+        ipmsg::LogMessage("FILE_XFER", "", msg);
     }
 }
 
@@ -360,7 +345,7 @@ void FileTransferManager::HandleClientConnection(SOCKET clientSocket,
     WriteTransferLog("File path resolved: '" + filePath + "', matchedTransferId=" + matchedTransferId +
                      ", exists=" + (filePath.empty() ? "N/A(empty)" : (fs::exists(filePath) ? "yes" : "NO")));
 
-    if (filePath.empty() || !fs::exists(filePath)) {
+    if (filePath.empty() || !fs::exists(fs::u8path(filePath))) {
         WriteTransferLog("File NOT found for GETFILEDATA! reqPacketNo=" + std::to_string(reqPacketNo) +
                          ", fileId=" + std::to_string(fileId) + ", filePath='" + filePath + "'");
         closesocket(clientSocket);
@@ -377,8 +362,8 @@ std::string FileTransferManager::StartSendFile(const std::string& targetIp, int 
                                                 const std::string& toUser) {
     if (!ready_) return "";
 
-    // Check if file exists
-    if (!fs::exists(filePath)) {
+    // Check if file exists（用 u8path 正确解析 UTF-8 路径）
+    if (!fs::exists(fs::u8path(filePath))) {
         std::cerr << "[FileTransfer] File not found: " << filePath << std::endl;
         return "";
     }
@@ -386,9 +371,11 @@ std::string FileTransferManager::StartSendFile(const std::string& targetIp, int 
     // Generate transfer ID
     std::string transferId = GenerateTransferId();
 
-    // Get file info
-    fs::path path(filePath);
-    std::string fileName = path.filename().string();
+    // Get file info（u8path 确保 UTF-8 中文路径正确解析）
+    fs::path path(fs::u8path(filePath));
+    // ★ 修复：使用 u8string() 获取 UTF-8 文件名，而非 string()（后者在 Windows 上用本地代码页 GBK，
+    // 会产生非法 UTF-8，导致 Bridge::Emit 的 JSON dump 抛异常、进度事件无法送达前端）
+    std::string fileName = path.filename().u8string();
 
     // Strip timestamp prefix from temp filename (format: "{timestamp}_{original_name}")
     // The temp file is created by HandleFileSaveTemp with a timestamp prefix
@@ -404,7 +391,7 @@ std::string FileTransferManager::StartSendFile(const std::string& targetIp, int 
         }
     }
 
-    int64_t fileSize = fs::file_size(filePath);
+    int64_t fileSize = fs::file_size(fs::u8path(filePath));
 
     // Create transfer record
     TransferProgress transfer;
@@ -453,8 +440,8 @@ void FileTransferManager::SendFileThread(const std::string& transferId, SOCKET c
     // Update status to transferring
     UpdateTransferProgress(transferId, 0, TransferStatus::Transferring);
 
-    // Open file
-    std::ifstream file(filePath, std::ios::binary);
+    // Open file（u8path 支持中文路径）
+    std::ifstream file(fs::u8path(filePath), std::ios::binary);
     if (!file.is_open()) {
         WriteTransferLog("Failed to open file: " + filePath);
         UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
@@ -587,12 +574,12 @@ void FileTransferManager::RecvFileThread(const std::string& transferId, const st
     // Update status to transferring
     UpdateTransferProgress(transferId, 0, TransferStatus::Transferring);
 
-    // Create directory if not exists
-    fs::path path(savePath);
+    // Create directory if not exists（u8path 支持中文路径）
+    fs::path path(fs::u8path(savePath));
     fs::create_directories(path.parent_path());
 
-    // Open file for writing
-    std::ofstream file(savePath, std::ios::binary);
+    // Open file for writing（u8path 支持中文保存文件名）
+    std::ofstream file(fs::u8path(savePath), std::ios::binary);
     if (!file.is_open()) {
         WriteTransferLog("Failed to create file: " + savePath);
         UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
