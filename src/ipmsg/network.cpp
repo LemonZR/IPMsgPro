@@ -4,10 +4,10 @@
 
 // WinSock2 must come before Windows.h (included via network.h)
 #include "network.h"
+#include "logger.h"
 #include <Windows.h>
 #include <Lmcons.h>  // UNLEN
 #include <regex>
-#include <iostream>
 
 namespace ipmsg {
 
@@ -36,7 +36,7 @@ std::vector<std::string> GetLocalIPAddresses() {
     GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
                          GAA_FLAG_SKIP_DNS_SERVER, nullptr, nullptr, &bufLen);
     if (bufLen == 0) {
-        std::cout << "[Network] GetAdaptersAddresses returned zero buffer length" << std::endl;
+        LogMessage("NETWORK", "", "[Network] GetAdaptersAddresses returned zero buffer length");
         return addresses;
     }
 
@@ -46,20 +46,20 @@ std::vector<std::string> GetLocalIPAddresses() {
     ULONG ret = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
                                      GAA_FLAG_SKIP_DNS_SERVER, nullptr, adapters, &bufLen);
     if (ret != ERROR_SUCCESS) {
-        std::cout << "[Network] GetAdaptersAddresses failed, error=" << ret << std::endl;
+        LogMessage("NETWORK", "", "[Network] GetAdaptersAddresses failed, error=" + std::to_string(ret));
         return addresses;
     }
 
-    std::cout << "[Network] Scanning network adapters..." << std::endl;
+    LogMessage("NETWORK", "", "[Network] Scanning network adapters...");
     for (auto adapter = adapters; adapter; adapter = adapter->Next) {
         std::string adapterName = adapter->AdapterName ? adapter->AdapterName : "(unknown)";
-        std::cout << "[Network] Adapter: " << adapterName 
-                  << ", Status=" << (adapter->OperStatus == IfOperStatusUp ? "UP" : "DOWN")
-                  << ", Type=" << adapter->IfType << std::endl;
+        LogMessage("NETWORK", "", std::string("[Network] Adapter: ") + adapterName +
+                   ", Status=" + std::string(adapter->OperStatus == IfOperStatusUp ? "UP" : "DOWN") +
+                   ", Type=" + std::to_string(adapter->IfType));
 
         if (adapter->OperStatus != IfOperStatusUp) continue;
         if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK) {
-            std::cout << "[Network] Skipping loopback adapter" << std::endl;
+            LogMessage("NETWORK", "", "[Network] Skipping loopback adapter");
             continue;
         }
 
@@ -70,11 +70,11 @@ std::vector<std::string> GetLocalIPAddresses() {
             char ipStr[INET_ADDRSTRLEN] = {};
             inet_ntop(AF_INET, &sa->sin_addr, ipStr, sizeof(ipStr));
             addresses.push_back(ipStr);
-            std::cout << "[Network] Found local IP: " << ipStr << std::endl;
+            LogMessage("NETWORK", "", "[Network] Found local IP: " + std::string(ipStr));
         }
     }
 
-    std::cout << "[Network] Total local IPs found: " << addresses.size() << std::endl;
+    LogMessage("NETWORK", "", "[Network] Total local IPs found: " + std::to_string(addresses.size()));
     return addresses;
 }
 
@@ -98,7 +98,7 @@ std::string GetBroadcastAddress(const std::string& ip) {
 std::vector<std::string> GetAllBroadcastAddresses() {
     std::vector<std::string> broadcasts;
     broadcasts.push_back("255.255.255.255");
-    std::cout << "[Network] Using limited broadcast address only: 255.255.255.255" << std::endl;
+    LogMessage("NETWORK", "", "[Network] Using limited broadcast address only: 255.255.255.255");
     return broadcasts;
 }
 

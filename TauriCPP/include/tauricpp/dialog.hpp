@@ -38,8 +38,11 @@ public:
     static std::optional<std::string> SaveFile(HWND parent, const SaveOptions& options = {});
 
     /// 选择文件夹对话框（阻塞）
+    /// @param initialDir 初始选中的目录（为空则从默认位置开始）
     /// @return 选中的文件夹路径，取消返回空
-    static std::optional<std::string> PickFolder(HWND parent, const std::string& title = "Select Folder");
+    static std::optional<std::string> PickFolder(HWND parent,
+                                                  const std::string& title = "Select Folder",
+                                                  const std::string& initialDir = "");
 
     /// 显示消息框
     static void ShowInfo(HWND parent, const std::string& title, const std::string& message);

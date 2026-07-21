@@ -24,6 +24,9 @@
 #include <tauricpp/dialog.hpp>
 #include <shlobj.h>
 #include <thread>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 // ============================================================================
 // Utility: Convert GBK to UTF-8 on Windows
@@ -79,6 +82,17 @@ static std::string Utf8ToGbk(const std::string& utf8) {
     return gbk;
 }
 
+// UTF-8 -> UTF-16 (wide string) for Win32 APIs.
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return {};
+    std::wstring wstr(wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wstr[0], wlen);
+    if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
+    return wstr;
+}
+
 static bool IsValidUtf8(const std::string& str) {
     // Quick check: if all bytes are ASCII, it's valid UTF-8
     bool hasNonAscii = false;
@@ -113,10 +127,6 @@ static std::string EnsureUtf8(const std::string& str) {
 namespace ipmsg {
 
 namespace {
-    // Simple file logger for debugging GUI message flow
-    void WriteDebugLog(const std::string& msg) {
-        ipmsg::LogMessage("BRIDGE", "", msg);
-    }
 
     // Extract embedded notification.mp3 resource to a temp file (once) and return its path
     std::string GetNotificationSoundPath() {
@@ -137,7 +147,7 @@ namespace {
         HMODULE hModule = GetModuleHandle(nullptr);
         HRSRC hRes = FindResourceA(hModule, MAKEINTRESOURCEA(IDR_NOTIFICATION_MP3), RT_RCDATA);
         if (!hRes) {
-            WriteDebugLog("[SOUND] Failed to find notification.mp3 resource");
+            LogMessage("BRIDGE", "", "[SOUND] Failed to find notification.mp3 resource");
             return "";
         }
         HGLOBAL hGlobal = LoadResource(hModule, hRes);
@@ -150,7 +160,7 @@ namespace {
         if (!out.good()) return "";
         out.write(reinterpret_cast<const char*>(pData), size);
         out.close();
-        WriteDebugLog("[SOUND] Extracted notification.mp3 to " + outPath);
+        LogMessage("BRIDGE", "", "[SOUND] Extracted notification.mp3 to " + outPath);
         return outPath;
     }
 
@@ -158,7 +168,7 @@ namespace {
     void PlayNotificationSound() {
         std::string soundPath = GetNotificationSoundPath();
         if (soundPath.empty()) {
-            WriteDebugLog("[SOUND] No sound path, aborting");
+            LogMessage("BRIDGE", "", "[SOUND] No sound path, aborting");
             return;
         }
 
@@ -180,9 +190,9 @@ namespace {
                 Sleep(3000);
                 mciSendStringA("close notify_snd", nullptr, 0, nullptr);
             }).detach();
-            WriteDebugLog("[SOUND] Playing notification sound");
+            LogMessage("BRIDGE", "", "[SOUND] Playing notification sound");
         } else {
-            WriteDebugLog("[SOUND] mciSendString open failed, err=" + std::to_string(err));
+            LogMessage("BRIDGE", "", "[SOUND] mciSendString open failed, err=" + std::to_string(err));
         }
     }
 }
@@ -202,13 +212,13 @@ void CommandHandler::Init(tauricpp::Bridge& bridge, MsgMng& msgMng,
 
 void CommandHandler::SetNativeWindowHandle(void* hwnd) {
     hwnd_ = static_cast<void*>(hwnd);
-    WriteDebugLog("[DIALOG] SetNativeWindowHandle called, hwnd=" + 
+    LogMessage("BRIDGE", "", "[DIALOG] SetNativeWindowHandle called, hwnd=" + 
                   (hwnd ? std::to_string(reinterpret_cast<uintptr_t>(hwnd)) : "NULL"));
 }
 
 void CommandHandler::SetWindow(tauricpp::Window* window) {
     window_ = window;
-    WriteDebugLog("[WINDOW] SetWindow called");
+    LogMessage("BRIDGE", "", "[WINDOW] SetWindow called");
 }
 
 void CommandHandler::RegisterAllCommands() {
@@ -233,6 +243,8 @@ void CommandHandler::RegisterAllCommands() {
     // File
     bridge_->RegisterCommand("file.send",
         [this](const nlohmann::json& args) { return HandleFileSend(args); });
+    bridge_->RegisterCommand("file.info",
+        [this](const nlohmann::json& args) { return HandleFileInfo(args); });
     bridge_->RegisterCommand("file.recv",
         [this](const nlohmann::json& args) { return HandleFileRecv(args); });
     bridge_->RegisterCommand("file.save_temp",
@@ -282,29 +294,36 @@ void CommandHandler::SetupEventForwarding() {
             {"isSending", progress.isSending}
         };
 
-        WriteDebugLog("[PROGRESS-CB] transferId=" + progress.transferId +
+        LogMessage("BRIDGE", "", "[PROGRESS-CB] transferId=" + progress.transferId +
                      ", status=" + std::to_string(static_cast<int>(progress.status)) +
                      ", transferred=" + std::to_string(progress.transferred) +
                      "/" + std::to_string(progress.fileSize) +
                      ", isSending=" + std::to_string(progress.isSending));
 
-        if (progress.status == ipmsg::TransferStatus::Completed) {
-            // File transfer completed
-            event["message"] = progress.isSending ? "File sent successfully" : "File received successfully";
-            if (!progress.isSending) {
-                event["savePath"] = progress.localPath;
+        try {
+            if (progress.status == ipmsg::TransferStatus::Completed) {
+                // File transfer completed
+                event["message"] = progress.isSending ? "File sent successfully" : "File received successfully";
+                if (!progress.isSending) {
+                    event["savePath"] = progress.localPath;
+                }
+                LogMessage("BRIDGE", "", "[PROGRESS-CB] Emitting file.transfer_completed for transferId=" + progress.transferId);
+                bridge_->Emit("file.transfer_completed", event);
+            } else if (progress.status == ipmsg::TransferStatus::Failed) {
+                // File transfer failed
+                event["message"] = "File transfer failed";
+                bridge_->Emit("file.transfer_failed", event);
+            } else {
+                // Progress update
+                event["progress"] = progress.fileSize > 0 ?
+                    (progress.transferred * 100.0 / progress.fileSize) : 0.0;
+                bridge_->Emit("file.transfer_progress", event);
             }
-            WriteDebugLog("[PROGRESS-CB] Emitting file.transfer_completed for transferId=" + progress.transferId);
-            bridge_->Emit("file.transfer_completed", event);
-        } else if (progress.status == ipmsg::TransferStatus::Failed) {
-            // File transfer failed
-            event["message"] = "File transfer failed";
-            bridge_->Emit("file.transfer_failed", event);
-        } else {
-            // Progress update
-            event["progress"] = progress.fileSize > 0 ?
-                (progress.transferred * 100.0 / progress.fileSize) : 0.0;
-            bridge_->Emit("file.transfer_progress", event);
+        } catch (const std::exception& e) {
+            LogMessage("BRIDGE", "", "[PROGRESS-CB] Emit threw for transferId=" + progress.transferId +
+                          " filename=" + progress.filename + ": " + e.what());
+        } catch (...) {
+            LogMessage("BRIDGE", "", "[PROGRESS-CB] Emit threw unknown exception for transferId=" + progress.transferId);
         }
     });
 
@@ -335,30 +354,34 @@ void CommandHandler::SetupEventForwarding() {
                     case IPMSG_RECVMSG: modeStr = "RECVMSG"; break;
                     default: modeStr = "UNKNOWN"; break;
                 }
-                std::cout << "[GUI-MSG] ====== BEGIN MESSAGE ======" << std::endl;
-                std::cout << "[GUI-MSG] packetNo=" << msg.packetNo << std::endl;
-                std::cout << "[GUI-MSG] from=" << msg.sender.userName << "@"
-                          << msg.sender.hostName << " (" << msg.sender.ipAddress << ":" 
-                          << msg.sender.portNo << ")" << std::endl;
-                std::cout << "[GUI-MSG] nickName=" << msg.sender.nickName 
-                          << ", groupName=" << msg.sender.groupName << std::endl;
-                std::cout << "[GUI-MSG] command=" << cmdBuf << " (" << modeStr << ")" << std::endl;
-                std::cout << "[GUI-MSG] command_flags: ";
-                if (msg.command & IPMSG_SENDCHECKOPT) std::cout << "SENDCHECKOPT ";
-                if (msg.command & IPMSG_FILEATTACHOPT) std::cout << "FILEATTACHOPT ";
-                if (msg.command & IPMSG_UTF8OPT) std::cout << "UTF8OPT ";
-                if (msg.command & IPMSG_CAPUTF8OPT) std::cout << "CAPUTF8OPT ";
-                std::cout << std::endl;
-                std::cout << "[GUI-MSG] body=\"" << msg.body << "\" (len=" << msg.body.size() << ")" << std::endl;
-                std::cout << "[GUI-MSG] extra=\"" << msg.extra << "\" (len=" << msg.extra.size() << ")" << std::endl;
-                std::cout << "[GUI-MSG] extra_hex: ";
-                for (size_t i = 0; i < msg.extra.size() && i < 200; ++i) {
-                    std::cout << std::hex << std::setfill('0') << std::setw(2) 
-                              << (unsigned int)(unsigned char)msg.extra[i] << " ";
+                LogMessage("BRIDGE", "", "[GUI-MSG] ====== BEGIN MESSAGE ======");
+                LogMessage("BRIDGE", "", "[GUI-MSG] packetNo=" + std::to_string(msg.packetNo));
+                LogMessage("BRIDGE", "", std::string("[GUI-MSG] from=") + msg.sender.userName + "@" +
+                              msg.sender.hostName + " (" + msg.sender.ipAddress + ":" +
+                              std::to_string(msg.sender.portNo) + ")");
+                LogMessage("BRIDGE", "", std::string("[GUI-MSG] nickName=") + msg.sender.nickName +
+                              ", groupName=" + msg.sender.groupName);
+                LogMessage("BRIDGE", "", std::string("[GUI-MSG] command=") + cmdBuf + " (" + modeStr + ")");
+                {
+                    std::string flags;
+                    if (msg.command & IPMSG_SENDCHECKOPT) flags += "SENDCHECKOPT ";
+                    if (msg.command & IPMSG_FILEATTACHOPT) flags += "FILEATTACHOPT ";
+                    if (msg.command & IPMSG_UTF8OPT) flags += "UTF8OPT ";
+                    if (msg.command & IPMSG_CAPUTF8OPT) flags += "CAPUTF8OPT ";
+                    LogMessage("BRIDGE", "", "[GUI-MSG] command_flags: " + flags);
                 }
-                std::cout << std::dec << std::endl;
-                std::cout << "[GUI-MSG] ====== END MESSAGE ======" << std::endl;
-                WriteDebugLog(std::string("[GUI-MSG] from=") + msg.sender.userName + "@" +
+                LogMessage("BRIDGE", "", std::string("[GUI-MSG] body=\"") + msg.body + "\" (len=" + std::to_string(msg.body.size()) + ")");
+                LogMessage("BRIDGE", "", std::string("[GUI-MSG] extra=\"") + msg.extra + "\" (len=" + std::to_string(msg.extra.size()) + ")");
+                {
+                    std::ostringstream hexOs;
+                    hexOs << std::hex << std::setfill('0') << std::setw(2);
+                    for (size_t i = 0; i < msg.extra.size() && i < 200; ++i) {
+                        hexOs << (unsigned int)(unsigned char)msg.extra[i] << " ";
+                    }
+                    LogMessage("BRIDGE", "", "[GUI-MSG] extra_hex: " + hexOs.str());
+                }
+                LogMessage("BRIDGE", "", "[GUI-MSG] ====== END MESSAGE ======");
+                LogMessage("BRIDGE", "", std::string("[GUI-MSG] from=") + msg.sender.userName + "@" +
                               msg.sender.ipAddress + ":" + std::to_string(msg.sender.portNo) +
                               " cmd=" + cmdBuf + " mode=" + modeStr +
                               " body=\"" + msg.body + "\" extra=\"" + msg.extra + "\"");
@@ -474,20 +497,20 @@ void CommandHandler::SetupEventForwarding() {
                         else if (c >= 32 && c < 127) extraDbg << c;
                         else extraDbg << "<" << std::hex << (int)c << ">";
                     }
-                    WriteDebugLog(extraDbg.str());
+                    LogMessage("BRIDGE", "", extraDbg.str());
                 }
                 {
                     std::ostringstream detailOs;
                     detailOs << std::dec << "[RECV-FILE-EXTRA] Parsed: fileId=" << fileId 
                              << ", fileName=" << fileName << ", fileSize=" << fileSize;
-                    WriteDebugLog(detailOs.str());
+                    LogMessage("BRIDGE", "", detailOs.str());
                 }
                 {
                     std::ostringstream detailOs;
                     detailOs << "[RECV-FILE-EXTRA] Original msg: packetNo=" << msg.packetNo 
                              << ", cmd=0x" << std::hex << msg.command << std::dec
                              << ", body='" << msg.body << "'";
-                    WriteDebugLog(detailOs.str());
+                    LogMessage("BRIDGE", "", detailOs.str());
                 }
 
                 // Determine if image or file based on extension
@@ -555,7 +578,7 @@ void CommandHandler::SetupEventForwarding() {
 
             // If file attachment, emit file receive request event (NOT auto-accepting)
             if (isFileAttach && !fileName.empty()) {
-                WriteDebugLog("[FILE_REQ_EMIT] packetNo=" + std::to_string(msg.packetNo) +
+                LogMessage("BRIDGE", "", "[FILE_REQ_EMIT] packetNo=" + std::to_string(msg.packetNo) +
                               ", fromUser=" + msg.sender.Key() +
                               ", fromIp=" + msg.sender.ipAddress +
                               ", fromPort=" + std::to_string(msg.sender.portNo) +
@@ -564,7 +587,7 @@ void CommandHandler::SetupEventForwarding() {
                               ", fileId=" + std::to_string(fileId) +
                               ", transferId=" + std::to_string(msg.packetNo));
                 
-                WriteDebugLog("[BRIDGE_EMIT] Emitting file.receive_request event");
+                LogMessage("BRIDGE", "", "[BRIDGE_EMIT] Emitting file.receive_request event");
                 bridge_->Emit("file.receive_request", {
                     {"packetNo", msg.packetNo},
                     {"fromUser", msg.sender.Key()},
@@ -588,11 +611,9 @@ void CommandHandler::SetupEventForwarding() {
                 }
             }
         } catch (const std::exception& e) {
-            std::cerr << "[GUI-MSG] Exception in message callback: " << e.what() << std::endl;
-            WriteDebugLog(std::string("[GUI-MSG] Exception: ") + e.what());
+            LogMessage("BRIDGE", "", std::string("[GUI-MSG] Exception in message callback: ") + e.what());
         } catch (...) {
-            std::cerr << "[GUI-MSG] Unknown exception in message callback" << std::endl;
-            WriteDebugLog("[GUI-MSG] Unknown exception");
+            LogMessage("BRIDGE", "", "[GUI-MSG] Unknown exception in message callback");
         }
     });
 
@@ -652,31 +673,31 @@ nlohmann::json CommandHandler::HandleConfigSet(const nlohmann::json& args) {
     
     if (!nickname.empty() || !group.empty()) {
         msgMng_->UpdateLocalInfo(nickname, group);
-        std::cout << "[BACKEND-CONFIG] Updated: nickname=" << nickname << ", group=" << group << std::endl;
-        WriteDebugLog("Config updated: nickname=" + nickname + ", group=" + group);
+        LogMessage("BRIDGE", "", "[BACKEND-CONFIG] Updated: nickname=" + nickname + ", group=" + group);
+        LogMessage("BRIDGE", "", "Config updated: nickname=" + nickname + ", group=" + group);
     }
 
     // Store custom data directory (used for downloads etc.)
     if (!dataDir.empty()) {
         dataDir_ = dataDir;
         CreateDirectoryA(dataDir_.c_str(), nullptr);
-        WriteDebugLog("Config updated: dataDir=" + dataDir_);
+        LogMessage("BRIDGE", "", "Config updated: dataDir=" + dataDir_);
     } else if (args.contains("dataDir") && args["dataDir"].is_string() && args["dataDir"].get<std::string>().empty()) {
         // dataDir explicitly set to empty -> reset to default
         dataDir_.clear();
-        WriteDebugLog("Config updated: dataDir reset to default");
+        LogMessage("BRIDGE", "", "Config updated: dataDir reset to default");
     }
 
     // Store minimize behavior setting
     if (args.contains("minimizeBehavior")) {
         minimizeBehavior_ = args.value("minimizeBehavior", "taskbar");
-        WriteDebugLog("Config updated: minimizeBehavior=" + minimizeBehavior_);
+        LogMessage("BRIDGE", "", "Config updated: minimizeBehavior=" + minimizeBehavior_);
     }
 
     // Store notification sound setting
     if (args.contains("notificationSound")) {
         notificationSound_ = args.value("notificationSound", true);
-        WriteDebugLog("Config updated: notificationSound=" + std::string(notificationSound_ ? "true" : "false"));
+        LogMessage("BRIDGE", "", "Config updated: notificationSound=" + std::string(notificationSound_ ? "true" : "false"));
     }
     
     return {{"success", true}};
@@ -695,7 +716,7 @@ nlohmann::json CommandHandler::HandleMessageSend(const nlohmann::json& args) {
         return {{"success", false}, {"error", "Message content is empty"}};
     }
 
-    std::cout << "[BACKEND-SEND] TEXT to=" << target->Key() << ", content=\"" << content << "\"" << std::endl;
+    LogMessage("BRIDGE", "", "[BACKEND-SEND] TEXT to=" + target->Key() + ", content=\"" + content + "\"");
 
     // Normal mode: send via UDP
     // Try UTF-8 first (with IPMSG_UTF8OPT flag), fallback to GBK if needed.
@@ -736,7 +757,7 @@ nlohmann::json CommandHandler::HandleMessageSendImage(const nlohmann::json& args
         return {{"success", false}, {"error", "Image file path is empty"}};
     }
 
-    std::cout << "[BACKEND-SEND] IMAGE to=" << target->Key() << ", filePath=\"" << filePath << "\"" << std::endl;
+    LogMessage("BRIDGE", "", "[BACKEND-SEND] IMAGE to=" + target->Key() + ", filePath=\"" + filePath + "\"");
 
     // Start TCP file transfer (register file info for serving)
     std::string transferId = fileTransfer_->StartSendFile(
@@ -783,14 +804,14 @@ nlohmann::json CommandHandler::HandleMessageSendImage(const nlohmann::json& args
             else if (c >= 32 && c < 127) dbgOs << c;
             else dbgOs << "<" << std::hex << (int)c << ">";
         }
-        WriteDebugLog("[SEND-FILE-EXTRA] " + dbgOs.str());
+        LogMessage("BRIDGE", "", "[SEND-FILE-EXTRA] " + dbgOs.str());
         std::ostringstream detailOs;
         detailOs << std::dec << "[SEND-FILE-EXTRA] fileId=" << fileInfo->fileId 
                   << ", fileName=" << fileInfo->fileName
                   << ", fileSize=" << fileInfo->fileSize
                   << ", modifyTime=" << fileInfo->modifyTime
                   << ", fileAttr=" << fileInfo->fileAttr;
-        WriteDebugLog(detailOs.str());
+        LogMessage("BRIDGE", "", detailOs.str());
     }
 
     // Normal mode: send UDP notification with file attachment info
@@ -842,7 +863,7 @@ nlohmann::json CommandHandler::HandleFileSend(const nlohmann::json& args) {
         return {{"success", false}, {"error", "File path is empty"}};
     }
 
-    std::cout << "[BACKEND-SEND] FILE to=" << target->Key() << ", filePath=\"" << filePath << "\"" << std::endl;
+    LogMessage("BRIDGE", "", "[BACKEND-SEND] FILE to=" + target->Key() + ", filePath=\"" + filePath + "\"");
 
     // Start TCP file transfer (register file info for serving)
     std::string transferId = fileTransfer_->StartSendFile(
@@ -889,33 +910,33 @@ nlohmann::json CommandHandler::HandleFileSend(const nlohmann::json& args) {
             else if (c >= 32 && c < 127) dbgOs << c;
             else dbgOs << "<" << std::hex << (int)c << ">";
         }
-        WriteDebugLog("[SEND-FILE-EXTRA] " + dbgOs.str());
+        LogMessage("BRIDGE", "", "[SEND-FILE-EXTRA] " + dbgOs.str());
         std::ostringstream detailOs;
         detailOs << std::dec << "[SEND-FILE-EXTRA] fileId=" << fileInfo->fileId 
                   << ", fileName=" << fileInfo->fileName
                   << ", fileSize=" << fileInfo->fileSize
                   << ", modifyTime=" << fileInfo->modifyTime
                   << ", fileAttr=" << fileInfo->fileAttr;
-        WriteDebugLog(detailOs.str());
+        LogMessage("BRIDGE", "", detailOs.str());
     }
 
     // Normal mode: send UDP notification with file attachment info
-    std::cout << "[BACKEND-SEND] Sending SENDMSG with FILEATTACHOPT to " << target->Key() 
-              << " (fileId=" << fileInfo->fileId << ", fileSize=" << fileInfo->fileSize << ")" << std::endl;
-    std::cout << "[BACKEND-SEND] File attach info: " << fileAttachInfo << std::endl;
+    LogMessage("BRIDGE", "", "[BACKEND-SEND] Sending SENDMSG with FILEATTACHOPT to " + target->Key() +
+                  " (fileId=" + std::to_string(fileInfo->fileId) + ", fileSize=" + std::to_string(fileInfo->fileSize) + ")");
+    LogMessage("BRIDGE", "", "[BACKEND-SEND] File attach info: " + fileAttachInfo);
     
     // 通知消息文本里的文件名也用 GBK，避免飞秋消息列表里乱码
     uint64_t sentPktNo = msgMng_->SendMessageWithFile(*target, "[File: " + Utf8ToGbk(fileInfo->fileName) + "]", fileAttachInfo, IPMSG_SENDCHECKOPT);
 
     if (sentPktNo > 0) {
-        std::cout << "[BACKEND-SEND] SENDMSG sent successfully, packetNo=" << sentPktNo << std::endl;
+        LogMessage("BRIDGE", "", "[BACKEND-SEND] SENDMSG sent successfully, packetNo=" + std::to_string(sentPktNo));
         // Store the SENDMSG packetNo in FileInfo for matching GETFILEDATA requests
         {
             auto fi = fileTransfer_->GetFileInfo(transferId);
             if (fi) {
                 fi->packetNo = sentPktNo;
                 fileTransfer_->RegisterFileInfo(transferId, *fi);
-                std::cout << "[BACKEND-SEND] FileInfo updated: packetNo=" << sentPktNo << ", fileId=" << fi->fileId << std::endl;
+                LogMessage("BRIDGE", "", "[BACKEND-SEND] FileInfo updated: packetNo=" + std::to_string(sentPktNo) + ", fileId=" + std::to_string(fi->fileId));
             }
         }
         // Save to database
@@ -942,6 +963,24 @@ nlohmann::json CommandHandler::HandleFileSend(const nlohmann::json& args) {
     return {{"success", true}, {"transferId", transferId}, {"fileName", fileInfo->fileName}};
 }
 
+nlohmann::json CommandHandler::HandleFileInfo(const nlohmann::json& args) {
+    std::string filePath = args.value("filePath", "");
+    if (filePath.empty()) {
+        return {{"success", false}, {"error", "File path is empty"}};
+    }
+    try {
+        std::error_code ec;
+        uint64_t size = fs::file_size(fs::u8path(filePath), ec);
+        if (ec) {
+            return {{"success", false}, {"error", ec.message()}};
+        }
+        std::string name = fs::u8path(filePath).filename().u8string();
+        return {{"success", true}, {"fileSize", size}, {"fileName", name}};
+    } catch (const std::exception& e) {
+        return {{"success", false}, {"error", std::string(e.what())}};
+    }
+}
+
 nlohmann::json CommandHandler::HandleFileRecv(const nlohmann::json& args) {
     auto target = FindUserFromArgs(args);
     if (!target) {
@@ -959,7 +998,7 @@ nlohmann::json CommandHandler::HandleFileRecv(const nlohmann::json& args) {
         return {{"success", false}, {"error", "Missing required parameters"}};
     }
 
-    std::cout << "[BACKEND-RECV] FILE from=" << target->Key() << ", fileName=\"" << fileName << "\", fileSize=" << fileSize << ", savePath=\"" << savePath << "\"" << std::endl;
+    LogMessage("BRIDGE", "", "[BACKEND-RECV] FILE from=" + target->Key() + ", fileName=\"" + fileName + "\", fileSize=" + std::to_string(fileSize) + ", savePath=\"" + savePath + "\"");
 
     // Start receiving file via TCP (same port as UDP per IPMsg protocol)
     std::string recvTransferId = fileTransfer_->StartRecvFile(
@@ -1083,14 +1122,14 @@ nlohmann::json CommandHandler::HandleFileSaveTemp(const nlohmann::json& args) {
 }
 
 nlohmann::json CommandHandler::HandleFileAccept(const nlohmann::json& args) {
-    WriteDebugLog("[BACKEND-ACCEPT-ENTRY] file.accept called with args: " + args.dump());
+    LogMessage("BRIDGE", "", "[BACKEND-ACCEPT-ENTRY] file.accept called with args: " + args.dump());
 
     auto target = FindUserFromArgs(args);
     if (!target) {
-        WriteDebugLog("[BACKEND-ACCEPT-ERROR] Target user not found! args=" + args.dump());
+        LogMessage("BRIDGE", "", "[BACKEND-ACCEPT-ERROR] Target user not found! args=" + args.dump());
         return {{"success", false}, {"error", "Target user not found"}};
     }
-    WriteDebugLog("[BACKEND-ACCEPT] Found target user: " + target->Key() + ", ip=" + target->ipAddress + ", port=" + std::to_string(target->portNo));
+    LogMessage("BRIDGE", "", "[BACKEND-ACCEPT] Found target user: " + target->Key() + ", ip=" + target->ipAddress + ", port=" + std::to_string(target->portNo));
 
     std::string transferId = args.value("transferId", "");
     std::string fileName = args.value("fileName", "");
@@ -1106,14 +1145,14 @@ nlohmann::json CommandHandler::HandleFileAccept(const nlohmann::json& args) {
         CreateDirectoryA(saveDir.c_str(), nullptr);
         savePath = saveDir + "\\" + fileName;
     }
-    WriteDebugLog("[BACKEND-ACCEPT] savePath=" + savePath);
+    LogMessage("BRIDGE", "", "[BACKEND-ACCEPT] savePath=" + savePath);
 
     if (transferId.empty() || fileName.empty() || savePath.empty()) {
-        WriteDebugLog("[BACKEND-ACCEPT-ERROR] Missing required parameters!");
+        LogMessage("BRIDGE", "", "[BACKEND-ACCEPT-ERROR] Missing required parameters!");
         return {{"success", false}, {"error", "Missing required parameters"}};
     }
 
-    WriteDebugLog("[BACKEND-ACCEPT] Calling StartRecvFile: ip=" + target->ipAddress + ", port=" + std::to_string(target->portNo) + ", fileName=" + fileName + ", fileSize=" + std::to_string(fileSize) + ", savePath=" + savePath + ", origPacketNo=" + std::to_string(origPacketNo) + ", origFileId=" + std::to_string(origFileId));
+    LogMessage("BRIDGE", "", "[BACKEND-ACCEPT] Calling StartRecvFile: ip=" + target->ipAddress + ", port=" + std::to_string(target->portNo) + ", fileName=" + fileName + ", fileSize=" + std::to_string(fileSize) + ", savePath=" + savePath + ", origPacketNo=" + std::to_string(origPacketNo) + ", origFileId=" + std::to_string(origFileId));
 
     // Send IPMSG_RECVMSG acknowledgment to sender (delivery receipt)
     // Use the original SENDMSG packetNo (not the internal transferId)
@@ -1127,10 +1166,10 @@ nlohmann::json CommandHandler::HandleFileAccept(const nlohmann::json& args) {
         target->ipAddress, target->portNo, fileName, fileSize, savePath, target->Key(),
         origPacketNo, origFileId);
 
-    WriteDebugLog("[BACKEND-ACCEPT] StartRecvFile result: recvTransferId=" + recvTransferId);
+    LogMessage("BRIDGE", "", "[BACKEND-ACCEPT] StartRecvFile result: recvTransferId=" + recvTransferId);
 
     if (recvTransferId.empty()) {
-        WriteDebugLog("[BACKEND-ACCEPT-ERROR] StartRecvFile failed!");
+        LogMessage("BRIDGE", "", "[BACKEND-ACCEPT-ERROR] StartRecvFile failed!");
         return {{"success", false}, {"error", "Failed to start file receive"}};
     }
 
@@ -1187,8 +1226,12 @@ nlohmann::json CommandHandler::HandleFileOpenFolder(const nlohmann::json& args) 
         return {{"success", false}, {"error", "Path is empty"}};
     }
 
-    // Use ShellExecuteW to open explorer and select the file
-    std::wstring wPath(path.begin(), path.end());
+    // Use ShellExecuteW to open explorer and select the file.
+    // The path is UTF-8; convert it to UTF-16 properly so Chinese paths work.
+    std::wstring wPath = Utf8ToWide(path);
+    if (wPath.empty()) {
+        return {{"success", false}, {"error", "Invalid path encoding"}};
+    }
     std::wstring params = L"/select,\"" + wPath + L"\"";
 
     HINSTANCE result = ShellExecuteW(
@@ -1318,19 +1361,21 @@ std::optional<UserInfo> CommandHandler::FindUserFromArgs(const nlohmann::json& a
 
 nlohmann::json CommandHandler::HandleDialogPickFolder(const nlohmann::json& args) {
     std::string title = args.value("title", "Select Folder");
-    WriteDebugLog("[DIALOG] HandleDialogPickFolder called, title=" + title);
+    std::string initialDir = args.value("initial_dir", "");
+    LogMessage("BRIDGE", "", "[DIALOG] HandleDialogPickFolder called, title=" + title +
+               ", initialDir=" + (initialDir.empty() ? "(default)" : initialDir));
 
     if (!hwnd_) {
-        WriteDebugLog("[DIALOG] ERROR: hwnd_ is null!");
+        LogMessage("BRIDGE", "", "[DIALOG] ERROR: hwnd_ is null!");
         return {{"success", false}, {"error", "Window handle not available"}};
     }
 
-    WriteDebugLog("[DIALOG] hwnd_=" + std::to_string(reinterpret_cast<uintptr_t>(hwnd_)));
+    LogMessage("BRIDGE", "", "[DIALOG] hwnd_=" + std::to_string(reinterpret_cast<uintptr_t>(hwnd_)));
     HWND hWnd = static_cast<HWND>(hwnd_);
-    WriteDebugLog("[DIALOG] Calling PickFolder with hWnd=" + std::to_string(reinterpret_cast<uintptr_t>(hWnd)));
-    
-    auto folder = tauricpp::Dialog::PickFolder(hWnd, title);
-    WriteDebugLog("[DIALOG] PickFolder returned, folder=" + (folder ? *folder : "(empty)"));
+    LogMessage("BRIDGE", "", "[DIALOG] Calling PickFolder with hWnd=" + std::to_string(reinterpret_cast<uintptr_t>(hWnd)));
+
+    auto folder = tauricpp::Dialog::PickFolder(hWnd, title, initialDir);
+    LogMessage("BRIDGE", "", "[DIALOG] PickFolder returned, folder=" + (folder ? *folder : "(empty)"));
     
     if (folder) {
         return {{"success", true}, {"folder", *folder}};
@@ -1341,10 +1386,10 @@ nlohmann::json CommandHandler::HandleDialogPickFolder(const nlohmann::json& args
 nlohmann::json CommandHandler::HandleDialogOpen(const nlohmann::json& args) {
     std::string title = args.value("title", "选择文件");
     bool multi = args.value("multi_select", false);
-    WriteDebugLog("[DIALOG] HandleDialogOpen called, title=" + title);
+    LogMessage("BRIDGE", "", "[DIALOG] HandleDialogOpen called, title=" + title);
 
     if (!hwnd_) {
-        WriteDebugLog("[DIALOG] ERROR: hwnd_ is null!");
+        LogMessage("BRIDGE", "", "[DIALOG] ERROR: hwnd_ is null!");
         return {{"success", false}, {"error", "Window handle not available"}};
     }
 

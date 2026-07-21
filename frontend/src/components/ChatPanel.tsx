@@ -110,6 +110,8 @@ export default function ChatPanel() {
   const [pendingFileName, setPendingFileName] = useState<string>('');
   const [previewMode, setPreviewMode] = useState<'image' | 'file' | null>(null);
   const [previewDataUrl, setPreviewDataUrl] = useState<string | undefined>();
+  // Real file size (bytes) for the send-confirm modal, queried from backend
+  const [pendingFileSize, setPendingFileSize] = useState<number | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -289,6 +291,10 @@ export default function ChatPanel() {
         setPreviewMode('file');
         setPreviewFile(null);
         setPreviewDataUrl(undefined);
+        // Query real file size from backend for the confirm modal
+        invoke<{ success?: boolean; fileSize?: number }>('file.info', { filePath: fp })
+          .then((r) => setPendingFileSize(r && r.success ? (r.fileSize ?? 0) : 0))
+          .catch(() => setPendingFileSize(0));
       }
     } catch (e) {
       console.error('[ChatPanel] dialog.open failed', e);
@@ -312,6 +318,7 @@ export default function ChatPanel() {
 
     setPendingFilePath(null);
     setPendingFileName('');
+    setPendingFileSize(null);
     setPreviewFile(null);
     setPreviewMode(null);
     setPreviewDataUrl(undefined);
@@ -321,6 +328,7 @@ export default function ChatPanel() {
     setPreviewFile(null);
     setPreviewMode(null);
     setPreviewDataUrl(undefined);
+    setPendingFileSize(null);
   };
 
   // ---- Drag & drop files onto the chat to trigger a file send ----
@@ -343,6 +351,7 @@ export default function ChatPanel() {
       reader.readAsDataURL(file);
     } else {
       setPreviewFile(file);
+      setPendingFileSize(null); // dropped files use file.size in the modal
       setPreviewMode('file');
       setPendingFilePath(null);
       setPendingFileName(file.name);
@@ -538,7 +547,7 @@ export default function ChatPanel() {
           mode={previewMode}
           file={previewFile ?? undefined}
           fileName={pendingFileName}
-          fileSize={0}
+          fileSize={pendingFileSize ?? 0}
           dataUrl={previewDataUrl}
           onConfirm={previewMode === 'image' ? handleImageSend : handleFileSend}
           onCancel={handlePreviewCancel}

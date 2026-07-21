@@ -1,4 +1,4 @@
-# 倍信 (IPMsg Pro) v1.2.0
+# 倍信 (IPMsg Pro) v1.2.2
 
 基于 [TauriCPP](https://github.com/masonwu21/TauriCPP) 框架和 [ipmsg-master](https://ipmsg.org/) 协议实现的局域网即时通讯应用，兼容飞秋和IPMsg v3.0 协议（UDP 2425 端口）。
 
@@ -102,6 +102,14 @@ cmake --build build_x86 --config Release
 - 文件传输进度实时显示，发送完成后进度保持在 100% 并显示「发送成功」，支持打开接收文件所在文件夹
 
 ## 更新日志
+
+### v1.2.2
+- **修复飞秋列表中中文昵称/群组名乱码**
+  - 本地用户信息（昵称、群组等）以 UTF-8 存储，广播报文在未携带 `IPMSG_UTF8OPT` 时统一编码为 GBK 发送，飞秋（FeiQ）可正确显示中文名
+  - 文本消息与文件消息正文统一在 `MakeMsg` 内完成 UTF-8 → GBK 编码，避免重复转换
+  - **修复“打开文件夹”跳到桌面**：接收文件后打开所在文件夹时，UTF-8 路径未正确转为 UTF-16 导致中文路径失效，改用 `MultiByteToWideChar(CP_UTF8)` 正确转换
+  - **文件传输崩溃防护与追踪日志**：文件收/发均运行于 detached 线程，未捕获异常会触发 `std::terminate` 直接崩溃且无日志。现已在 `HandleClientConnection`/`SendFileThread`/`RecvFileThread` 入口及前端事件回调 `bridge_->Emit`（含 WebView2 回调）处包裹 try/catch 并记录异常；并在 `WinMain` 安装 `SetUnhandledExceptionFilter` + `std::set_terminate`，将 SEH 异常/未捕获 C++ 异常写入 `ipmsg_gui_debug.log`，便于定位中文文件名等场景的崩溃根因
+- **日志入口统一**：将分散的 `WriteTransferLog`（`FILE_XFER`）、`WriteDebugLog`（`BRIDGE`）、`MsgLog`（`MSGMNG`）包装函数以及各模块中裸写的 `std::cout`/`std::cerr` 全部收口到唯一的 `ipmsg::LogMessage(tag, level, msg)` 入口，日志统一按 `[时间][模块][级别] 消息` 格式输出到 `ipmsg_gui_debug.log`，便于统一追踪与排查。
 
 ### v1.2.0
 - **文件传输进度显示优化**

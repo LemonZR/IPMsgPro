@@ -84,8 +84,15 @@ void Bridge::Emit(const std::string& event, const nlohmann::json& data) {
         return;
     }
 
-    std::cout << "[Bridge::Emit] event=" << event << ", js_len=" << js.size() << std::endl;
-    cb(js);
+    try {
+        cb(js);
+    } catch (const std::exception& e) {
+        // std::cout/cerr are redirected to ipmsg_gui_debug.log by InitLogger,
+        // so this line also lands in the unified log file.
+        std::cout << "[Bridge::Emit] callback threw for event=" << event << ": " << e.what() << std::endl;
+    } catch (...) {
+        std::cout << "[Bridge::Emit] callback threw unknown exception for event=" << event << std::endl;
+    }
 }
 
 void Bridge::SetExecuteJsCallback(ExecuteJsCallback cb) {
@@ -95,18 +102,30 @@ void Bridge::SetExecuteJsCallback(ExecuteJsCallback cb) {
 
 std::string Bridge::GetBridgeJs() {
     // Get user home directory for injecting into frontend
-    std::string homeDir;
+    std::string homeDir;        // forward slashes, for JS path operations
+    std::string defaultDataDir; // matches backend GetAppDataDir (backslashes)
 #ifdef _WIN32
     char userProfile[MAX_PATH] = {};
     if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) > 0) {
         homeDir = userProfile;
+        defaultDataDir = std::string(userProfile) + "\\.ipmsgpro";
     } else {
         SHGetFolderPathA(nullptr, CSIDL_PROFILE, nullptr, 0, userProfile);
         homeDir = userProfile;
+        defaultDataDir = std::string(userProfile) + "\\.ipmsgpro";
     }
-    // Convert backslashes to forward slashes for JS
+    // Convert backslashes to forward slashes for homeDir (JS)
     for (auto& c : homeDir) {
         if (c == '\\') c = '/';
+    }
+    // Escape backslashes so the path is a valid JS string literal
+    {
+        std::string escaped;
+        for (char c : defaultDataDir) {
+            if (c == '\\') escaped += "\\\\";
+            else escaped += c;
+        }
+        defaultDataDir = escaped;
     }
 #endif
 
@@ -118,7 +137,7 @@ std::string Bridge::GetBridgeJs() {
         _invokeId: 0,
         _invokeCallbacks: {},
         homeDir: )js" + std::string("\"") + homeDir + "\"" + R"js(,
-        defaultDataDir: )js" + std::string("\"") + homeDir + "/.ipmsgpro\"" + R"js(,
+        defaultDataDir: )js" + std::string("\"") + defaultDataDir + "\"" + R"js(,
 
         invoke: function(cmd, args) {
             return new Promise((resolve, reject) => {

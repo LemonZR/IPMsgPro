@@ -21,6 +21,7 @@
 
 #include <string>
 #include <atomic>
+#include <exception>
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -651,6 +652,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     // Initialize unified logger (fresh ipmsg_gui_debug.log, redirect cout/cerr)
     std::string dataDir = GetAppDataDir(cliArgs.port);
     ipmsg::InitLogger(dataDir);
+
+    // Install global crash handlers so hard faults (access violation / heap
+    // corruption) and uncaught C++ exceptions are written to the log instead of
+    // failing silently. The log is the single source of truth for crash analysis.
+    std::set_terminate([]() {
+        ipmsg::LogMessage("CRASH", "", "std::terminate called (uncaught C++ exception) - aborting");
+        abort();
+    });
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* ep) -> LONG {
+        auto toHex = [](uint64_t v) {
+            char buf[24] = {};
+            snprintf(buf, sizeof(buf), "%llX", static_cast<unsigned long long>(v));
+            return std::string(buf);
+        };
+        std::string code = "0x" + toHex(ep->ExceptionRecord->ExceptionCode);
+        std::string addr = "0x" + toHex(reinterpret_cast<uintptr_t>(ep->ExceptionRecord->ExceptionAddress));
+        ipmsg::LogMessage("CRASH", "", "Unhandled SEH exception code=" + code + " at address=" + addr);
+        return EXCEPTION_CONTINUE_SEARCH;
+    });
 
     LOG_INFO("========================================");
     LOG_INFO("IPMsgPro starting...");

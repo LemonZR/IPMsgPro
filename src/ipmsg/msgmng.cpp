@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <sstream>
 #include <chrono>
-#include <iostream>
 #include <fstream>
 #include <mutex>
 #include <chrono>
@@ -23,13 +22,6 @@
 #endif
 
 namespace ipmsg {
-
-// ============================================================================
-// Logger (unified into ipmsg_gui_debug.log via logger.h)
-// ============================================================================
-static void MsgLog(const std::string& msg) {
-    ipmsg::LogMessage("MSGMNG", "", msg);
-}
 
 // ============================================================================
 // Encoding Conversion (GBK <-> UTF-8)
@@ -147,24 +139,24 @@ bool MsgMng::Init(int portNo, const std::string& userName,
     localUser_.active = true;
     localUser_.updateTime = std::time(nullptr);
 
-    std::cout << "[MsgMng] Local user: " << localUser_.userName << "@" << localUser_.hostName 
-              << ", nickname=" << localUser_.nickName << ", port=" << portNo_ << std::endl;
+    LogMessage("MSGMNG", "", std::string("[MsgMng] Local user: ") + localUser_.userName + "@" + localUser_.hostName +
+               ", nickname=" + localUser_.nickName + ", port=" + std::to_string(portNo_));
 
     // Auto-detect local IPs
     auto localIPs = GetLocalIPAddresses();
     if (!localIPs.empty()) {
         localUser_.ipAddress = localIPs[0];
-        std::cout << "[MsgMng] Using primary IP: " << localUser_.ipAddress << std::endl;
+        LogMessage("MSGMNG", "", std::string("[MsgMng] Using primary IP: ") + localUser_.ipAddress);
     } else {
-        std::cout << "[MsgMng] WARNING: No local IP addresses found!" << std::endl;
+        LogMessage("MSGMNG", "", "[MsgMng] WARNING: No local IP addresses found!");
     }
 
     // Create UDP socket
     if (!CreateUdpSocket()) {
-        std::cout << "[MsgMng] ERROR: Failed to create UDP socket!" << std::endl;
+        LogMessage("MSGMNG", "", "[MsgMng] ERROR: Failed to create UDP socket!");
         return false;
     }
-    std::cout << "[MsgMng] UDP socket created and bound to port " << portNo_ << std::endl;
+    LogMessage("MSGMNG", "", "[MsgMng] UDP socket created and bound to port " + std::to_string(portNo_));
 
     // Auto-detect broadcast segments
     auto broadcasts = GetAllBroadcastAddresses();
@@ -172,15 +164,15 @@ bool MsgMng::Init(int portNo, const std::string& userName,
         segments_.push_back(bc);
     }
 
-    std::cout << "[MsgMng] Broadcast segments configured:" << std::endl;
+    LogMessage("MSGMNG", "", "[MsgMng] Broadcast segments configured:");
     for (const auto& seg : segments_) {
-        std::cout << "[MsgMng]   - " << seg << std::endl;
+        LogMessage("MSGMNG", "", "[MsgMng]   - " + seg);
     }
 
     // Start receive thread
     running_ = true;
     recvThread_ = std::thread(&MsgMng::ReceiveThreadFunc, this);
-    std::cout << "[MsgMng] Receive thread started" << std::endl;
+    LogMessage("MSGMNG", "", "[MsgMng] Receive thread started");
 
     ready_ = true;
     return true;
@@ -316,11 +308,11 @@ void MsgMng::ProcessRecvBuffer(const sockaddr_in& fromAddr, const char* data, in
         msg.sender.updateTime = std::time(nullptr);
         AddOrUpdateUser(msg.sender);
 
-        std::cout << "[MsgMng] USER DISCOVERED (BR_ENTRY): " 
-                  << msg.sender.userName << "@" << msg.sender.hostName 
-                  << " (" << msg.sender.ipAddress << ":" << msg.sender.portNo << ")"
-                  << ", nickname=" << msg.sender.nickName 
-                  << ", group=" << msg.sender.groupName << std::endl;
+        LogMessage("MSGMNG", "", std::string("[MsgMng] USER DISCOVERED (BR_ENTRY): ")
+                  + msg.sender.userName + "@" + msg.sender.hostName
+                  + " (" + msg.sender.ipAddress + ":" + std::to_string(msg.sender.portNo) + ")"
+                  + ", nickname=" + msg.sender.nickName
+                  + ", group=" + msg.sender.groupName);
 
         if (onUserDiscovered_) {
             onUserDiscovered_(msg.sender);
@@ -355,11 +347,11 @@ void MsgMng::ProcessRecvBuffer(const sockaddr_in& fromAddr, const char* data, in
         msg.sender.updateTime = std::time(nullptr);
         AddOrUpdateUser(msg.sender);
 
-        std::cout << "[MsgMng] USER DISCOVERED (ANSENTRY): " 
-                  << msg.sender.userName << "@" << msg.sender.hostName 
-                  << " (" << msg.sender.ipAddress << ":" << msg.sender.portNo << ")"
-                  << ", nickname=" << msg.sender.nickName 
-                  << ", group=" << msg.sender.groupName << std::endl;
+        LogMessage("MSGMNG", "", std::string("[MsgMng] USER DISCOVERED (ANSENTRY): ")
+                  + msg.sender.userName + "@" + msg.sender.hostName
+                  + " (" + msg.sender.ipAddress + ":" + std::to_string(msg.sender.portNo) + ")"
+                  + ", nickname=" + msg.sender.nickName
+                  + ", group=" + msg.sender.groupName);
 
         if (onUserDiscovered_) {
             onUserDiscovered_(msg.sender);
@@ -434,10 +426,18 @@ std::string MsgMng::MakeMsg(uint64_t packetNo, uint32_t command,
     bool isAnsEntry = (mode == IPMSG_ANSENTRY);
     bool isUtf8 = (command & IPMSG_UTF8OPT) != 0;
 
-    std::string userName = isUtf8 ? GBKToUTF8(localUser_.userName) : localUser_.userName;
-    std::string hostName = isUtf8 ? GBKToUTF8(localUser_.hostName) : localUser_.hostName;
-    std::string nickName = isUtf8 ? GBKToUTF8(localUser_.nickName) : localUser_.nickName;
-    std::string groupName = isUtf8 ? GBKToUTF8(localUser_.groupName) : localUser_.groupName;
+    // Local user fields are stored as UTF-8 (the frontend sends UTF-8). When
+    // broadcasting without IPMSG_UTF8OPT we must encode the wire payload as GBK
+    // so clients such as FeiQ display Chinese names correctly instead of mojibake.
+    // The isUtf8 branch keeps the legacy GBK->UTF-8 conversion for completeness.
+    auto toWire = [&](const std::string& s) -> std::string {
+        return isUtf8 ? GBKToUTF8(s) : UTF8ToGBK(s);
+    };
+
+    std::string userName = toWire(localUser_.userName);
+    std::string hostName = toWire(localUser_.hostName);
+    std::string nickName = toWire(localUser_.nickName);
+    std::string groupName = toWire(localUser_.groupName);
 
     // Build header: "ver:packetNo:userName:hostName:command:"
     std::string result;
@@ -450,12 +450,15 @@ std::string MsgMng::MakeMsg(uint64_t packetNo, uint32_t command,
     result += std::to_string(command) + ":";
 
     // Append body (message text or nickname for BR commands)
-    result += msg;
+    result += toWire(msg);
 
-    // Append extra (separated by '\0')
-    if (!extra.empty()) {
+    // Append extra (separated by '\0'). Only encode for local-user info packets
+    // (group name); file-attach info must stay raw.
+    bool isLocalInfo = isBrCmd || isAnsEntry;
+    std::string extraOut = isLocalInfo ? toWire(extra) : extra;
+    if (!extraOut.empty()) {
         result += std::string(1, '\0');
-        result += extra;
+        result += extraOut;
     }
 
     // For BR_ENTRY/BR_EXIT/BR_NOTIFY, append extended info after another '\0'
@@ -483,7 +486,7 @@ bool MsgMng::ResolveMsg(const char* buf, int size,
 
     // Log raw message for debugging
     std::string rawMsg(buf, size);
-    MsgLog("========== RAW MESSAGE START (" + std::to_string(size) + " bytes from " + fromIP + ":" + std::to_string(fromPort) + ") ==========");
+    LogMessage("MSGMNG", "", "========== RAW MESSAGE START (" + std::to_string(size) + " bytes from " + fromIP + ":" + std::to_string(fromPort) + ") ==========");
     
     // Print raw hex dump
     std::stringstream hexDump;
@@ -497,14 +500,14 @@ bool MsgMng::ResolveMsg(const char* buf, int size,
                 unsigned char c = buf[j];
                 hexDump << (c >= 32 && c < 127 ? (char)c : '.');
             }
-            MsgLog(hexDump.str());
+            LogMessage("MSGMNG", "", hexDump.str());
             hexDump.str("");
         }
     }
     
     // Print protocol fields
-    MsgLog("Raw string (first 200 chars): " + rawMsg.substr(0, 200));
-    MsgLog("========== RAW MESSAGE END ==========");
+    LogMessage("MSGMNG", "", "Raw string (first 200 chars): " + rawMsg.substr(0, 200));
+    LogMessage("MSGMNG", "", "========== RAW MESSAGE END ==========");
     
     // Parse header by finding the first 5 colon-separated fields
     // Fields: version, packetNo, userName, hostName, command
@@ -532,7 +535,7 @@ bool MsgMng::ResolveMsg(const char* buf, int size,
         size_t verEnd = verStr.find_first_not_of("0123456789");
         if (verEnd != std::string::npos) {
             verStr = verStr.substr(0, verEnd);
-            MsgLog("FeiQ extended version detected: " + fields[0] + ", using: " + verStr);
+            LogMessage("MSGMNG", "", "FeiQ extended version detected: " + fields[0] + ", using: " + verStr);
         }
         int version = std::stoi(verStr);
         if (version != IPMSG_VERSION) return false;
@@ -548,11 +551,11 @@ bool MsgMng::ResolveMsg(const char* buf, int size,
         out.sender.portNo = fromPort;
         out.timestamp = std::time(nullptr);
         
-        MsgLog("Parsed header: ver=" + fields[0] + " pkt=" + fields[1] + 
+        LogMessage("MSGMNG", "", "Parsed header: ver=" + fields[0] + " pkt=" + fields[1] + 
                " user=" + out.sender.userName + " host=" + out.sender.hostName + 
                " cmd=" + std::to_string(out.command));
     } catch (...) {
-        MsgLog("Failed to parse header");
+        LogMessage("MSGMNG", "", "Failed to parse header");
         return false;
     }
 
@@ -623,7 +626,7 @@ bool MsgMng::ResolveMsg(const char* buf, int size,
 
     out.sender.hostStatus = GET_OPT(out.command);
     
-    MsgLog("Resolved message: mode=" + std::to_string(mode) + 
+    LogMessage("MSGMNG", "", "Resolved message: mode=" + std::to_string(mode) + 
            " nick=" + out.sender.nickName + " group=" + out.sender.groupName);
 
     return true;
@@ -649,17 +652,15 @@ void MsgMng::UdpBroadcast(const std::string& data) {
 
     for (const auto& bc : broadcasts) {
         bool sent = UdpSend(bc, portNo_, data);
-        std::cout << "[MsgMng] Broadcast to " << bc << ":" << portNo_ 
-                  << " (size=" << data.size() << " bytes) " 
-                  << (sent ? "OK" : "FAILED") << std::endl;
+        LogMessage("MSGMNG", "", "[MsgMng] Broadcast to " + bc + ":" + std::to_string(portNo_) +
+                   " (size=" + std::to_string(data.size()) + " bytes) " + (sent ? "OK" : "FAILED"));
     }
 
     // Also broadcast to custom segments
     for (const auto& seg : segments_) {
         bool sent = UdpSend(seg, portNo_, data);
-        std::cout << "[MsgMng] Broadcast to " << seg << ":" << portNo_ 
-                  << " (size=" << data.size() << " bytes) " 
-                  << (sent ? "OK" : "FAILED") << std::endl;
+        LogMessage("MSGMNG", "", "[MsgMng] Broadcast to " + seg + ":" + std::to_string(portNo_) +
+                   " (size=" + std::to_string(data.size()) + " bytes) " + (sent ? "OK" : "FAILED"));
     }
 }
 
@@ -677,7 +678,7 @@ void MsgMng::BroadcastEntry() {
         IPMSG_BR_ENTRY | IPMSG_CAPUTF8OPT,
         body, extra);
     
-    std::cout << "[MsgMng] Broadcasting BR_ENTRY to " << segments_.size() << " segments..." << std::endl;
+    LogMessage("MSGMNG", "", "[MsgMng] Broadcasting BR_ENTRY to " + std::to_string(segments_.size()) + " segments...");
     UdpBroadcast(msg);
 }
 
@@ -725,18 +726,17 @@ std::vector<std::string> MsgMng::GetSegments() const {
 
 bool MsgMng::SendMessage(const UserInfo& target, const std::string& message,
                           uint32_t options) {
-    // Feiq/FeiQ does not properly handle IPMSG_UTF8OPT for Chinese text,
-    // so we send GBK-encoded content without the UTF8 flag.
-    // The message body is UTF-8 from the frontend; convert it to GBK.
-    std::string gbkMessage = UTF8ToGBK(message);
+    // Wire encoding (UTF-8 from frontend -> GBK for FeiQ compatibility) is
+    // handled centrally in MakeMsg, so pass the message through as-is.
     uint32_t cmd = IPMSG_SENDMSG | options;
-    auto msg = MakeMsg(MakePacketNo(), cmd, gbkMessage);
+    auto msg = MakeMsg(MakePacketNo(), cmd, message);
     bool ok = UdpSend(target.ipAddress, target.portNo, msg);
     
-    std::cout << "[MsgMng] SendMessage to " << target.Key() 
-              << " (" << target.ipAddress << ":" << target.portNo << ")"
-              << " len=" << message.size() << " cmd=0x" << std::hex << cmd << std::dec
-              << " ok=" << (ok ? "true" : "false") << std::endl;
+    LogMessage("MSGMNG", "", "[MsgMng] SendMessage to " + target.Key() +
+               " (" + target.ipAddress + ":" + std::to_string(target.portNo) + ")"
+               + " len=" + std::to_string(message.size()) + " cmd=0x" +
+               ([](uint32_t v)->std::string{std::ostringstream o;o<<std::hex<<v;return o.str();})(cmd) +
+               " ok=" + (ok ? "true" : "false"));
     
     return ok;
 }
@@ -757,11 +757,12 @@ uint64_t MsgMng::SendMessageWithFile(const UserInfo& target, const std::string& 
             else if (msg[i] == '\x07') dbgMsg += "\\a";
             else dbgMsg += msg[i];
         }
-        std::cout << "[SEND-FILE] pktNo=" << pktNo << ", cmd=0x" << std::hex << cmd << std::dec 
-                  << ", msgLen=" << msg.size() << std::endl;
-        std::cout << "[SEND-FILE] rawMsg=" << dbgMsg << std::endl;
+        LogMessage("MSGMNG", "", "[SEND-FILE] pktNo=" + std::to_string(pktNo) + ", cmd=0x" +
+                   ([](uint32_t v)->std::string{std::ostringstream o;o<<std::hex<<v;return o.str();})(cmd) +
+                   ", msgLen=" + std::to_string(msg.size()));
+        LogMessage("MSGMNG", "", "[SEND-FILE] rawMsg=" + dbgMsg);
         // Also write to debug log for file-based analysis
-        MsgLog("[SEND-FILE-RAW] pktNo=" + std::to_string(pktNo) + ", cmd=0x" + 
+        LogMessage("MSGMNG", "", "[SEND-FILE-RAW] pktNo=" + std::to_string(pktNo) + ", cmd=0x" + 
                ([](uint32_t v)->std::string{std::ostringstream o;o<<std::hex<<v;return o.str();})(cmd) +
                ", rawMsg=" + dbgMsg);
     }

@@ -193,24 +193,39 @@ std::optional<std::string> Dialog::SaveFile(HWND parent, const SaveOptions& opti
     return result;
 }
 
-std::optional<std::string> Dialog::PickFolder(HWND parent, const std::string& title) {
+// Callback to pre-select the initial directory in SHBrowseForFolder
+static int CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM /*lParam*/, LPARAM lpData) {
+    if (uMsg == BFFM_INITIALIZED && lpData != 0) {
+        // lpData points to a wide-char path; TRUE => path is a string (not pidl)
+        SendMessageW(hwnd, BFFM_SETSELECTIONW, TRUE, (LPARAM)lpData);
+    }
+    return 0;
+}
+
+std::optional<std::string> Dialog::PickFolder(HWND parent, const std::string& title,
+                                              const std::string& initialDir) {
     std::optional<std::string> result;
 
     // Use SHBrowseForFolder for folder selection - simpler and more reliable
     // than COM IFileOpenDialog in WebView2 callback context
     std::wstring wTitle = Utf8ToWide(title);
-    
+    std::wstring wInitial = Utf8ToWide(initialDir);
+
     // Initialize COM for SHBrowseForFolder (needed for new dialog style)
     // Only call CoUninitialize if we actually initialized (S_OK),
     // not if COM was already initialized (S_FALSE)
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     bool needUninitialize = (hr == S_OK);  // S_FALSE means already initialized by WebView2
-    
+
     BROWSEINFOW bi = {};
     bi.hwndOwner = parent;
     bi.lpszTitle = wTitle.empty() ? nullptr : wTitle.c_str();
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
-    
+    if (!wInitial.empty()) {
+        bi.lpfn = BrowseCallbackProc;
+        bi.lParam = (LPARAM)wInitial.c_str();
+    }
+
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (pidl) {
         WCHAR path[MAX_PATH] = {};

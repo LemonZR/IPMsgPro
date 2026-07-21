@@ -32,6 +32,23 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       await configDB.init();
       const config = await configDB.loadConfig();
       console.log('[ConfigStore] Config loaded successfully:', JSON.stringify(config));
+
+      // Repair: if a previously saved dataDir is exactly the user's home directory
+      // (mistakenly persisted when the folder picker opened at home and OK was clicked),
+      // reset it to the default so the correct "C:\Users\<user>\.ipmsgpro" is shown.
+      const home = (typeof window !== 'undefined' && (window as any).__tauricpp__?.homeDir) || '';
+      const normalizePath = (p: string) => p.replace(/\//g, '\\').toLowerCase();
+      if (config.dataDir && home && normalizePath(config.dataDir) === normalizePath(home)) {
+        console.log('[ConfigStore] Repairing mistyped dataDir (== home):', config.dataDir);
+        config.dataDir = '';
+        try {
+          await configDB.saveConfig({ dataDir: '' });
+          await invoke('config.set', { dataDir: '' });
+        } catch (e) {
+          console.error('[ConfigStore] Failed to repair dataDir:', e);
+        }
+      }
+
       set({ config, loaded: true });
 
       // Apply saved nickname to backend immediately on startup
