@@ -277,6 +277,8 @@ void CommandHandler::RegisterAllCommands() {
         [this](const nlohmann::json& args) { return HandleDialogPickFolder(args); });
     bridge_->RegisterCommand("dialog.open",
         [this](const nlohmann::json& args) { return HandleDialogOpen(args); });
+    bridge_->RegisterCommand("shell_open",
+        [this](const nlohmann::json& args) { return HandleShellOpen(args); });
 
 }
 
@@ -1218,6 +1220,33 @@ nlohmann::json CommandHandler::HandleFileReject(const nlohmann::json& args) {
     }
 
     return {{"success", true}};
+}
+
+nlohmann::json CommandHandler::HandleShellOpen(const nlohmann::json& args) {
+    std::string url = args.value("url", "");
+    if (url.empty()) {
+        return {{"success", false}, {"error", "URL is empty"}};
+    }
+
+    // Open the URL in the user's default browser via ShellExecuteW.
+    // The URL is UTF-8; convert it to UTF-16 so it works regardless of locale.
+    std::wstring wUrl = Utf8ToWide(url);
+    if (wUrl.empty()) {
+        return {{"success", false}, {"error", "Invalid URL encoding"}};
+    }
+
+    HINSTANCE result = ShellExecuteW(
+        nullptr,
+        L"open",
+        wUrl.c_str(),
+        nullptr,
+        nullptr,
+        SW_SHOWNORMAL
+    );
+
+    // ShellExecuteW returns > 32 on success
+    bool ok = reinterpret_cast<INT_PTR>(result) > 32;
+    return {{"success", ok}};
 }
 
 nlohmann::json CommandHandler::HandleFileOpenFolder(const nlohmann::json& args) {

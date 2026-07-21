@@ -66,6 +66,11 @@ html, body, #root {
          placeholder-gray-400;
 }
 
+/* Source repository links (GitHub / Gitee) in About section */
+.git-link {
+  @apply text-gray-400 hover:text-primary-500 transition-colors;
+}
+
 /* ContentEditable chat input placeholder + inline emoji chips */
 .chat-editor:empty:before {
   content: attr(data-placeholder);
