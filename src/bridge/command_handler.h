@@ -102,4 +102,8 @@ private:
     bool notificationSound_ = true;  // play notification sound on new messages
 };
 
+/// Return the current user's Downloads folder, e.g. C:\Users\<user>\Downloads.
+/// Falls back to USERPROFILE\Downloads if the known-folder lookup fails.
+std::string GetUserDownloadsDir();
+
 } // namespace ipmsg

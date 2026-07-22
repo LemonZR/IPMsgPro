@@ -167,7 +167,7 @@ static void RunCliServer(int port) {
                              std::to_string(fileSize) + " bytes)");
 
                     // Generate save path
-                    std::string saveDir = GetAppDataDir(g_msgMng->GetLocalUser().portNo) + "\\Downloads";
+                    std::string saveDir = ipmsg::GetUserDownloadsDir();
                     CreateDirectoryA(saveDir.c_str(), nullptr);
                     std::string savePath = saveDir + "\\" + fileName;
 
@@ -320,7 +320,7 @@ static void RunCliTestRunner(int port, const std::string& configPath,
                     LOG_INFO("[RECV FILE] " + fileName + " (" +
                              std::to_string(fileSize) + " bytes)");
 
-                    std::string saveDir = GetAppDataDir(g_msgMng->GetLocalUser().portNo) + "\\Downloads";
+                    std::string saveDir = ipmsg::GetUserDownloadsDir();
                     CreateDirectoryA(saveDir.c_str(), nullptr);
                     std::string savePath = saveDir + "\\" + fileName;
 

@@ -1140,10 +1140,9 @@ nlohmann::json CommandHandler::HandleFileAccept(const nlohmann::json& args) {
     uint64_t origPacketNo = args.value("packetNo", (uint64_t)0);
     int origFileId = args.value("fileId", 0);
 
-    // If savePath is empty, auto-generate using data directory Downloads folder
+    // If savePath is empty, auto-generate using the user's Downloads folder
     if (savePath.empty() && !fileName.empty()) {
-        std::string baseDir = GetDataDir();
-        std::string saveDir = baseDir + "\\Downloads";
+        std::string saveDir = GetUserDownloadsDir();
         CreateDirectoryA(saveDir.c_str(), nullptr);
         savePath = saveDir + "\\" + fileName;
     }
@@ -1448,6 +1447,18 @@ std::string CommandHandler::GetDataDir() const {
         SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, userProfile);
     }
     return std::string(userProfile) + "\\.ipmsgpro";
+}
+
+std::string GetUserDownloadsDir() {
+    // The user's Downloads folder lives under the user profile directory,
+    // e.g. C:\Users\<user>\Downloads. Use USERPROFILE (the documented
+    // location) to avoid depending on shell known-folder CSIDL constants
+    // that may be unavailable with WIN32_LEAN_AND_MEAN.
+    char userProfile[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) > 0) {
+        return std::string(userProfile) + "\\Downloads";
+    }
+    return "Downloads";
 }
 
 } // namespace ipmsg
