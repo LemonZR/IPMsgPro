@@ -122,6 +122,19 @@ cmake --build build_x86 --config Release
   - 文件在每次启动应用时清空重建，日志按 `[时间] [模块] [级别] 消息` 格式输出（`IPMSGPRO` / `MSGMNG` / `FILE_XFER` / `BRIDGE` 标签区分来源）
   - 日志目录：`%LOCALAPPDATA%\.ipmsgpro\ipmsg_gui_debug.log`（默认端口；自定义端口为 `.ipmsgpro_<端口>`）
 
+## 打赏 (Donate)
+
+如果这个项目对你有帮助，欢迎请作者喝杯咖啡 ☕
+
+![打赏](Donate.jpg)
+
 ## License
 
-MIT License © 2026 masonwu21
+本项目采用 **MIT 许可证**，仅供个人非商业用途免费使用。
+
+- **个人使用**：遵循 MIT 许可证，可自由使用、修改、分发。
+- **商业使用**：如需用于商业用途，须事先获得作者授权。
+
+如需商业授权，请联系：**support@emsoro.cn**
+
+MIT License © 2026 masonwu21（个人）
