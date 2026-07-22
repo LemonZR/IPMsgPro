@@ -625,7 +625,7 @@ function renderContent(
     default: {
       const emojiId = parseEmojiId(message.content);
       if (emojiId) {
-        return <EmojiSprite id={emojiId} size={64} />;
+        return <EmojiSprite id={emojiId} size={18} />;
       }
       // Mixed message: text with inline emoji tokens.
       const parts = splitInlineContent(message.content);

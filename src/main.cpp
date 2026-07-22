@@ -754,8 +754,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
     // Configure application
     tauricpp::App::Config config;
     config.window_config.title = "倍信";
-    config.window_config.width = 1200;
-    config.window_config.height = 800;
+    config.window_config.width = 960;
+    config.window_config.height = 640;
     config.window_config.center = true;
     config.window_config.devtools = true;
 
