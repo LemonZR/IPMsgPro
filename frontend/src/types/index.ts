@@ -45,6 +45,7 @@ export interface FileInfoAttachment {
 /** Config type */
 export interface Config {
   nickname: string;
+  group: string;        // user group name shown to peers
   password: string;
   segments: string[];   // multi-segment broadcast addresses
   port: number;
@@ -122,6 +123,7 @@ const getDefaultDataDir = (): string => {
 /** Default config */
 export const DEFAULT_CONFIG: Config = {
   nickname: '',
+  group: '',
   password: '',
   segments: [],
   port: 2425,

@@ -132,17 +132,28 @@ bool IsInSubnet(const std::string& ip, const std::string& subnet) {
 }
 
 std::string GetHostName() {
-    char buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
-    DWORD size = sizeof(buf);
-    GetComputerNameA(buf, &size);
-    return buf;
+    wchar_t buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+    if (!GetComputerNameW(buf, &size)) return "";
+    // Return UTF-8. The rest of the app treats localUser.hostName as UTF-8,
+    // and MakeMsg converts it to GBK for FeiQ via UTF8ToGBK. Using the *A
+    // variant here would return GBK bytes that get double-encoded into mojibake.
+    int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "";
+    std::string out(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, buf, -1, &out[0], len, nullptr, nullptr);
+    return out;
 }
 
 std::string GetUserName() {
-    char buf[UNLEN + 1] = {};
-    DWORD size = sizeof(buf);
-    ::GetUserNameA(buf, &size);
-    return buf;
+    wchar_t buf[UNLEN + 1] = {};
+    DWORD size = UNLEN + 1;
+    if (!::GetUserNameW(buf, &size)) return "";
+    int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "";
+    std::string out(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, buf, -1, &out[0], len, nullptr, nullptr);
+    return out;
 }
 
 std::string GetLocalMacAddress() {

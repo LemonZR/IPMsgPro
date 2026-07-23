@@ -95,15 +95,26 @@ export default function Settings({ onClose }: SettingsProps) {
         <div className="max-w-lg space-y-6">
           {/* User info */}
           <Section title="用户信息">
-            <Field label="昵称">
-              <input
-                type="text"
-                value={localConfig.nickname}
-                onChange={(e) => setLocalConfig({ ...localConfig, nickname: e.target.value })}
-                className="input-field"
-                placeholder="输入昵称"
-              />
-            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="昵称">
+                <input
+                  type="text"
+                  value={localConfig.nickname}
+                  onChange={(e) => setLocalConfig({ ...localConfig, nickname: e.target.value })}
+                  className="input-field"
+                  placeholder="输入昵称"
+                />
+              </Field>
+              <Field label="分组">
+                <input
+                  type="text"
+                  value={localConfig.group}
+                  onChange={(e) => setLocalConfig({ ...localConfig, group: e.target.value })}
+                  className="input-field"
+                  placeholder="输入分组"
+                />
+              </Field>
+            </div>
           </Section>
 
           {/* Network */}

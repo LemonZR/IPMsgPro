@@ -171,12 +171,15 @@ function ConversationCard({ user, selected, lastMessage, onClick }: {
         <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#F7F7F7] ${statusColor}`} />
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium text-gray-800 truncate">
             {user.nickname}
           </span>
-          <span className="text-[10px] text-gray-400 shrink-0 ml-2">
-            {user.ip}
+          <span className="flex items-center gap-2 shrink-0">
+            {user.group && (
+              <span className="text-xs text-gray-400">{user.group}</span>
+            )}
+            <span className="text-[10px] text-gray-400">{user.ip}</span>
           </span>
         </div>
         <p className="text-xs text-gray-400 truncate mt-0.5">
@@ -214,11 +217,16 @@ function ContactCard({ user, selected, onClick }: {
         <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#F7F7F7] ${statusColor}`} />
       </div>
       <div className="flex-1 min-w-0">
-        <span className="text-sm font-medium text-gray-800 truncate block">
-          {user.nickname}
-        </span>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium text-gray-800 truncate">
+            {user.nickname}
+          </span>
+          {user.group && (
+            <span className="text-xs text-gray-400 shrink-0">{user.group}</span>
+          )}
+        </div>
         <p className="text-xs text-gray-400 truncate mt-0.5">
-          {user.group ? `${user.group} · ` : ''}{user.ip}:{user.port}
+          {user.ip}:{user.port}
         </p>
       </div>
     </div>

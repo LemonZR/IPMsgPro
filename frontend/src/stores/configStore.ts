@@ -85,6 +85,16 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
         console.error('[ConfigStore] Failed to set notificationSound on backend:', e);
       }
 
+      // Apply saved group to backend
+      if (config.group) {
+        console.log('[ConfigStore] Applying saved group to backend:', config.group);
+        try {
+          await invoke('config.set', { group: config.group });
+        } catch (e) {
+          console.error('[ConfigStore] Failed to set group on backend:', e);
+        }
+      }
+
     } catch (err) {
       console.error('[ConfigStore] Failed to load config:', err);
       set({ loaded: true });
@@ -126,6 +136,13 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       if (notificationSound !== undefined) {
         console.log('[ConfigStore] Notifying backend of notificationSound change:', notificationSound);
         await invoke('config.set', { notificationSound });
+      }
+
+      // Notify backend of group changes
+      const group = partial.group;
+      if (group !== undefined) {
+        console.log('[ConfigStore] Notifying backend of group change:', group);
+        await invoke('config.set', { group });
       }
     } catch (err) {
       console.error('[ConfigStore] Failed to save config:', err);
