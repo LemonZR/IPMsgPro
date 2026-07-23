@@ -16,6 +16,7 @@
 
 #include "bridge/command_handler.h"
 #include "ipmsg/msgmng.h"
+#include "ipmsg/network.h"
 #include "database/message_db.h"
 #include "file/file_transfer.h"
 
@@ -39,6 +40,9 @@
 static void Log(const std::string& level, const std::string& msg) {
     ipmsg::LogMessage("IPMSGPRO", level, msg);
 }
+
+// 应用版本号（与 CMakeLists.txt / resources/app.rc 保持一致）
+static const char* kAppVersion = "1.3.0";
 
 #define LOG_INFO(msg) Log("INFO", msg)
 #define LOG_WARN(msg) Log("WARN", msg)
@@ -637,6 +641,75 @@ static CliArgs ParseCommandLine(LPSTR lpCmdLine) {
 }
 
 // ============================================================================
+// System info logging at startup (version / OS / locale / IP)
+// ============================================================================
+static std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+static std::string GetWindowsVersionString() {
+    std::string result;
+    HKEY hKey = nullptr;
+    // 读取 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion 获取系统版本
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        auto readStr = [&](LPCWSTR name) -> std::wstring {
+            wchar_t buf[512] = {};
+            DWORD size = sizeof(buf);
+            if (RegQueryValueExW(hKey, name, nullptr, nullptr, (LPBYTE)buf, &size) == ERROR_SUCCESS)
+                return std::wstring(buf);
+            return L"";
+        };
+        std::wstring product = readStr(L"ProductName");     // 如 "Windows 10 Pro"
+        std::wstring curVer  = readStr(L"CurrentVersion");  // 如 "10.0"
+        std::wstring build   = readStr(L"CurrentBuild");    // 如 "19045"
+        std::wstring disp    = readStr(L"DisplayVersion");  // 如 "22H2"
+        if (disp.empty()) disp = readStr(L"ReleaseId");     // 旧系统回退
+        result = WideToUtf8(product);
+        std::string ver = WideToUtf8(curVer);
+        if (!ver.empty()) result += " " + ver;
+        std::string buildU = WideToUtf8(build);
+        if (!buildU.empty()) result += "." + buildU;
+        std::string dispU = WideToUtf8(disp);
+        if (!dispU.empty()) result += " (" + dispU + ")";
+        RegCloseKey(hKey);
+    }
+    return result.empty() ? "Unknown" : result;
+}
+
+static std::string GetDefaultLocaleString() {
+    wchar_t localeName[LOCALE_NAME_MAX_LENGTH] = {};
+    // 返回形如 "zh-CN" 的默认用户区域（语言-地区）
+    if (GetUserDefaultLocaleName(localeName, LOCALE_NAME_MAX_LENGTH) > 0) {
+        return WideToUtf8(std::wstring(localeName));
+    }
+    return "Unknown";
+}
+
+static void LogSystemInfo() {
+    LOG_INFO("App Version: " + std::string(kAppVersion));
+    LOG_INFO("OS Version: " + GetWindowsVersionString());
+    LOG_INFO("Default Locale (language/region): " + GetDefaultLocaleString());
+
+    auto ips = ipmsg::GetLocalIPAddresses();
+    if (ips.empty()) {
+        LOG_INFO("Local IP: (none)");
+    } else {
+        std::string joined;
+        for (size_t i = 0; i < ips.size(); ++i) {
+            joined += ips[i];
+            if (i + 1 < ips.size()) joined += ", ";
+        }
+        LOG_INFO("Local IP addresses: " + joined);
+    }
+}
+
+// ============================================================================
 // Main entry point
 // ============================================================================
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow) {
@@ -686,6 +759,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int nCmdShow
         return 1;
     }
     LOG_INFO("Winsock initialized");
+
+    // 输出系统版本、默认语言/地区及本机 IP
+    LogSystemInfo();
 
     // Create core components
     g_msgMng = new ipmsg::MsgMng();

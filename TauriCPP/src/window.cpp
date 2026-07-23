@@ -9,18 +9,135 @@
 #include <shellscalingapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <objidl.h>
 #include <queue>
 #include <mutex>
 #include <vector>
+#include <iostream>
+#include <functional>
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shcore.lib")   // 用于 GetDpiForMonitor / SetProcessDpiAwarenessContext
 
 using namespace Microsoft::WRL;
 
+// ============================================================================
+// 原生文件拖放：让窗口直接接收拖入文件的真实路径
+// WebView2 默认会把拖入的文件作为「无路径」的 File 对象交给页面，页面无法读取
+// 磁盘上的真实路径。因此这里禁用 WebView2 自带的拖放处理，改用 Windows 原生
+// IDropTarget 接收 CF_HDROP，将真实路径通过 Bridge 事件发给前端，由前端以真实
+// 路径发送（走 file.send，不再经过 base64 + save_temp）。
+// ============================================================================
+class FileDropTarget : public IDropTarget {
+public:
+    FileDropTarget() : ref_(1) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IDropTarget || riid == IID_IUnknown) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&ref_); }
+    STDMETHODIMP_(ULONG) Release() override {
+        ULONG c = InterlockedDecrement(&ref_);
+        if (c == 0) delete this;
+        return c;
+    }
+
+    static std::string WideStrToUtf8(const std::wstring& w) {
+        if (w.empty()) return {};
+        int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+        std::string s(n, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
+        return s;
+    }
+
+    STDMETHODIMP DragEnter(IDataObject* pDataObj, DWORD /*grfKeyState*/, POINTL /*pt*/, DWORD* pdwEffect) override {
+        has_files_ = HasFiles(pDataObj);
+        dragging_ = has_files_;
+        *pdwEffect = has_files_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        EmitDragging(has_files_);
+        std::cerr << "[drop] DragEnter has_files=" << has_files_ << std::endl;
+        return S_OK;
+    }
+    STDMETHODIMP DragOver(DWORD /*grfKeyState*/, POINTL /*pt*/, DWORD* pdwEffect) override {
+        *pdwEffect = has_files_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+    STDMETHODIMP DragLeave() override {
+        has_files_ = false;
+        dragging_ = false;
+        EmitDragging(false);
+        std::cerr << "[drop] DragLeave" << std::endl;
+        return S_OK;
+    }
+    STDMETHODIMP Drop(IDataObject* pDataObj, DWORD /*grfKeyState*/, POINTL /*pt*/, DWORD* pdwEffect) override {
+        dragging_ = false;
+        EmitDragging(false);
+        std::cerr << "[drop] Drop called" << std::endl;
+        if (!HasFiles(pDataObj)) {
+            *pdwEffect = DROPEFFECT_NONE;
+            has_files_ = false;
+            return S_OK;
+        }
+        *pdwEffect = DROPEFFECT_COPY;
+
+        std::vector<std::string> paths;
+        FORMATETC fmt = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        STGMEDIUM stg = { 0 };
+        if (SUCCEEDED(pDataObj->GetData(&fmt, &stg)) && stg.tymed == TYMED_HGLOBAL && stg.hGlobal) {
+            HDROP hDrop = reinterpret_cast<HDROP>(GlobalLock(stg.hGlobal));
+            if (hDrop) {
+                UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+                for (UINT i = 0; i < count; ++i) {
+                    UINT len = DragQueryFileW(hDrop, i, nullptr, 0);
+                    std::wstring buf(len + 1, L'\0');
+                    DragQueryFileW(hDrop, i, buf.data(), len + 1);
+                    buf.resize(len);
+                    paths.push_back(WideStrToUtf8(buf));
+                }
+                GlobalUnlock(stg.hGlobal);
+            }
+            ReleaseStgMedium(&stg);
+        }
+
+        if (!paths.empty()) {
+            nlohmann::json data;
+            data["paths"] = paths;
+            tauricpp::Bridge::Instance().Emit("window.files_dropped", data);
+        }
+        has_files_ = false;
+        return S_OK;
+    }
+
+private:
+    static bool HasFiles(IDataObject* pDataObj) {
+        FORMATETC fmt = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        return pDataObj->QueryGetData(&fmt) == S_OK;
+    }
+    static void EmitDragging(bool on) {
+        nlohmann::json data;
+        data["dragging"] = on;
+        tauricpp::Bridge::Instance().Emit("window.files_dragging", data);
+    }
+
+    LONG ref_ = 1;
+    bool has_files_ = false;
+    static bool dragging_;
+public:
+    static bool IsDragging() { return dragging_; }
+};
+bool FileDropTarget::dragging_ = false;
+
 // 自定义窗口消息 - 用于投递JS到UI线程执行
 static const UINT WM_TAURICP_EXECUTE_JS = WM_APP + 1;
 static const UINT WM_TAURICP_ASYNC_INVOKE = WM_APP + 2;
+// 拖放目标重新登记的兜底定时器
+static const UINT kDropReapplyTimer = WM_APP + 10;
 
 
 // ============================================================================
@@ -100,6 +217,15 @@ Window::~Window() {
     if (env_) {
         env_->Release();
         env_ = nullptr;
+    }
+    if (drop_target_) {
+        if (hwnd_) {
+            KillTimer(hwnd_, kDropReapplyTimer);
+            RevokeDragDrop(hwnd_);
+            RevokeChildDragDrop(hwnd_);
+        }
+        static_cast<IDropTarget*>(drop_target_)->Release();
+        drop_target_ = nullptr;
     }
 }
 
@@ -294,8 +420,26 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             nid.uFlags = NIF_ICON;
             nid.hIcon = self->flashShowIcon_ ? self->trayOriginalIcon_ : self->trayBlankIcon_;
             Shell_NotifyIconW(NIM_MODIFY, &nid);
+        } else if (self && wParam == kDropReapplyTimer) {
+            // 兜底：拖拽未在进行时，重新把我们的拖放目标登记到所有窗口，
+            // 防止 WebView2 在运行时重新注册抢走 Drop。
+            if (!FileDropTarget::IsDragging()) {
+                self->RegisterNativeDropTargets();
+            }
         }
         return 0;
+
+    case WM_PARENTNOTIFY:
+        // WebView2 动态创建子窗口时，立即把我们的拖放目标登记上去，
+        // 避免这些新窗口在创建后、下一次定时兜底前成为“无目标”的命中窗口。
+        if (self && LOWORD(wParam) == WM_CREATE && self->drop_target_) {
+            HWND child = reinterpret_cast<HWND>(lParam);
+            if (child && child != self->hwnd_) {
+                RevokeDragDrop(child);
+                RegisterDragDrop(child, static_cast<IDropTarget*>(self->drop_target_));
+            }
+        }
+        break;
 
     case WM_CLOSE:
         if (self && self->on_close_) {
@@ -344,6 +488,50 @@ void Window::SetWebViewBackgroundColor() {
     }
 }
 
+void Window::RevokeChildDragDrop(HWND root) {
+    if (!root) return;
+    HWND child = nullptr;
+    while ((child = FindWindowExW(root, child, nullptr, nullptr)) != nullptr) {
+        RevokeDragDrop(child);        // 对未注册的窗口返回错误，可安全忽略
+        RevokeChildDragDrop(child);   // 递归处理更深层子窗口（WebView2 的浏览器窗口）
+    }
+}
+
+void Window::RegisterNativeDropTargets() {
+    if (!drop_target_) return;
+    // 1) 先撤销主窗口及所有子窗口上已有的拖放目标（含 WebView2 注册的）。
+    RevokeDragDrop(hwnd_);
+    RevokeChildDragDrop(hwnd_);
+    // 2) 把我们的 IDropTarget 注册到主窗口及每一个子窗口。
+    //    OLE 命中光标正下方的窗口，因此必须为每个可能被命中的窗口都注册，
+    //    否则撤销 WebView2 目标后该窗口没有目标，Drop 会被直接丢弃。
+    std::function<void(HWND)> regAll;
+    regAll = [this, &regAll](HWND root) {
+        RegisterDragDrop(root, static_cast<IDropTarget*>(drop_target_));
+        HWND child = nullptr;
+        while ((child = FindWindowExW(root, child, nullptr, nullptr)) != nullptr) {
+            RegisterDragDrop(child, static_cast<IDropTarget*>(drop_target_));
+            regAll(child);
+        }
+    };
+    regAll(hwnd_);
+    std::cerr << "[drop] RegisterNativeDropTargets done" << std::endl;
+}
+
+void Window::EnableNativeFileDrop() {
+    if (drop_target_) {
+        // 已初始化：重新登记（导航完成后 WebView2 可能重新注册过拖放目标）。
+        RegisterNativeDropTargets();
+        return;
+    }
+    OleInitialize(nullptr);
+    drop_target_ = new FileDropTarget();
+    RegisterNativeDropTargets();
+    // 定时兜底：WebView2 可能在运行时重新注册拖放目标抢走 Drop，
+    // 每 2 秒（非拖拽中）重新把我们的目标登记到所有窗口。
+    SetTimer(hwnd_, kDropReapplyTimer, 2000, nullptr);
+}
+
 // ============================================================================
 // 初始化WebView2
 // ============================================================================
@@ -380,6 +568,9 @@ bool Window::InitWebView() {
                                 webview_->AddRef();
                             }
 
+                            // 启用原生文件拖放（注册在主窗口的 IDropTarget 接收真实路径）
+                            EnableNativeFileDrop();
+
                             // 设置WebView填满窗口
                             RECT bounds;
                             GetClientRect(hwnd_, &bounds);
@@ -407,6 +598,8 @@ bool Window::InitWebView() {
                                             GetClientRect(hwnd_, &bounds);
                                             controller_->put_Bounds(bounds);
                                         }
+                                        // 确保 WebView2 自带的拖放已禁用（导航可能重置其状态）
+                                        EnableNativeFileDrop();
                                         return S_OK;
                                     }
                                 ).Get(),

@@ -129,6 +129,19 @@ private:
     /// 设置WebView2默认背景色（消除白屏闪烁）
     void SetWebViewBackgroundColor();
 
+    /// 启用原生文件拖放：在主窗口注册 IDropTarget 接收拖入文件的真实路径，
+    /// 并禁用 WebView2 自带的拖放处理（页面无法读取文件磁盘路径）。
+    void EnableNativeFileDrop();
+
+    /// 递归撤销指定窗口下所有子窗口（含深层浏览器子窗口）的拖放注册，
+    /// 使拖放最终落到我们的 IDropTarget，避免被 WebView2 抢走。
+    void RevokeChildDragDrop(HWND root);
+
+    /// 把我们的 IDropTarget 注册到主窗口及所有子窗口（含 WebView2 深层窗口）。
+    /// OLE 命中光标正下方的窗口，因此必须为每个可能被光标命中的窗口都注册，
+    /// 否则撤销 WebView2 目标后该窗口无目标，drop 会被直接丢弃。
+    void RegisterNativeDropTargets();
+
     /// Win32窗口过程
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -139,6 +152,10 @@ private:
     ICoreWebView2Environment* env_ = nullptr;
     bool webview_ready_ = false;
     std::atomic<bool> shutting_down_{false};
+
+    // 原生文件拖放：注册在主窗口上的 IDropTarget（禁用 WebView2 自带拖放，
+    // 使窗口能收到拖入文件的真实路径）。以 void* 存储以避免在头文件中引入 COM 头。
+    void* drop_target_ = nullptr;
 
     // 窗口生命周期回调
     CreatedCallback on_created_;

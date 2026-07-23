@@ -3,7 +3,7 @@ import { FiImage, FiFile, FiSmile, FiX, FiCheck, FiAlertCircle, FiDownload, FiFo
 import { useUserStore } from '../stores/userStore';
 import { useMessageStore, PendingFileReceive } from '../stores/messageStore';
 import { Message } from '../types';
-import { invoke } from '../services/bridge';
+import { invoke, listen } from '../services/bridge';
 import { EMOJIS, buildEmojiMessage, parseEmojiId, emojiStyle, EMOJI_TOKEN_RE } from '../emojiData';
 
 // ============================================================================
@@ -114,7 +114,7 @@ export default function ChatPanel() {
   const [pendingFileSize, setPendingFileSize] = useState<number | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
-  const [isDragOver, setIsDragOver] = useState(false);
+  const [nativeDragging, setNativeDragging] = useState(false);
 
   const userId = currentUser?.id || '';
 
@@ -331,33 +331,29 @@ export default function ChatPanel() {
     setPendingFileSize(null);
   };
 
-  // ---- Drag & drop files onto the chat to trigger a file send ----
-  // Note: in the webview, dropped files have no real filesystem path, so we
-  // route them through the same `previewFile` + SendPreview confirm flow as
-  // the file button (which sends via base64 for content-held files).
-  const handleFileDrop = (e: React.DragEvent) => {
-    setIsDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (!file) return; // not a file drag — let default (e.g. text) proceed
-    e.preventDefault();
-    if (!currentUser) return;
-    if (file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        setPreviewFile(file);
-        setPreviewMode('image');
-        setPreviewDataUrl(reader.result as string);
-      };
-      reader.readAsDataURL(file);
-    } else {
-      setPreviewFile(file);
-      setPendingFileSize(null); // dropped files use file.size in the modal
-      setPreviewMode('file');
-      setPendingFilePath(null);
-      setPendingFileName(file.name);
-      setPreviewDataUrl(undefined);
-    }
-  };
+  // ---- Native file drag & drop ----
+  // The window host (TauriCPP) captures dropped files at the OS level and emits
+  // their real filesystem paths via the `window.files_dropped` event, so we can
+  // send them through the real path (file.send) without base64 + save_temp.
+  // `window.files_dragging` toggles the drop overlay.
+  const currentUserRef = useRef(currentUser);
+  currentUserRef.current = currentUser;
+
+  useEffect(() => {
+    const offDrop = listen('window.files_dropped', (data: any) => {
+      const user = currentUserRef.current;
+      const paths: string[] = (data && data.paths) || [];
+      if (!user || paths.length === 0) return;
+      paths.forEach((p: string) => sendFileByPath(user.id, p));
+    });
+    const offDrag = listen('window.files_dragging', (data: any) => {
+      setNativeDragging(!!(data && data.dragging));
+    });
+    return () => {
+      offDrop();
+      offDrag();
+    };
+  }, [sendFileByPath]);
 
   // ---- File receive handlers ----
   // Stable references so memoized MessageBubble instances don't re-render
@@ -379,20 +375,15 @@ export default function ChatPanel() {
 
   return (
     <div
-      className={`flex-1 flex flex-col bg-white relative ${isDragOver ? 'ring-2 ring-inset ring-primary-400' : ''}`}
-      onDragOver={(e) => {
-        e.preventDefault();
-        if (e.dataTransfer.types.includes('Files')) setIsDragOver(true);
-      }}
-      onDragLeave={(e) => {
-        // Clear only when the pointer actually leaves the panel (not when
-        // moving onto a child element inside it).
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-          setIsDragOver(false);
-        }
-      }}
-      onDrop={handleFileDrop}
+      className={`flex-1 flex flex-col bg-white relative ${nativeDragging ? 'ring-2 ring-inset ring-primary-400' : ''}`}
     >
+      {nativeDragging && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-primary-50/70 pointer-events-none">
+          <div className="px-6 py-4 rounded-lg border-2 border-dashed border-primary-500 text-primary-600 text-sm font-medium">
+            释放以发送文件{currentUser ? `给 ${currentUser.nickname}` : ''}
+          </div>
+        </div>
+      )}
       {/* Chat header */}
       <div className="h-14 border-b border-gray-200 flex items-center px-4 shrink-0">
         <div>

@@ -1,4 +1,4 @@
-# 倍信 (IPMsg Pro) v1.2.2
+# 倍信 (IPMsg Pro) v1.3.0
 
 基于 [TauriCPP](https://github.com/masonwu21/TauriCPP) 框架和 [ipmsg-master](https://ipmsg.org/) 协议实现的局域网即时通讯应用，兼容飞秋和IPMsg v3.0 协议（UDP 2425 端口）。
 
@@ -102,6 +102,13 @@ cmake --build build_x86 --config Release
 - 文件传输进度实时显示，发送完成后进度保持在 100% 并显示「发送成功」，支持打开接收文件所在文件夹
 
 ## 更新日志
+
+### v1.3.0
+- **拖拽文件走真实磁盘路径发送（不再走 save_temp）**
+  - 在主窗口注册原生 `IDropTarget`，拦截系统级文件拖放（读取 `CF_HDROP` 中的真实文件路径），直接走 `file.send` 真实路径发送；不再经由前端 HTML5 拖放拿不到路径而退化为 base64 + `file.save_temp` 落盘的方案
+  - 把拖放目标同时登记到主窗口及所有 WebView2 子窗口（含深层浏览器子窗口），并每 2 秒兜底重新登记，解决 WebView2 抢走拖放目标导致「拖上去一闪而过、松手无反应」的问题
+- **启动日志增强**
+  - 程序启动时在 `ipmsg_gui_debug.log` 输出：应用版本号、当前系统版本号（Windows 产品名/版本/内部版本号/ReleaseId）、默认语言与地区（如 `zh-CN`）、本机所有 IPv4 地址，便于排障
 
 ### v1.2.2
 - **修复飞秋列表中中文昵称/群组名乱码**
