@@ -50,4 +50,8 @@ std::string GetHostName();
 /// Get username of the current logged-in user
 std::string GetUserName();
 
+/// Get the MAC address of the first active (non-loopback) adapter,
+/// formatted as uppercase hex without separators (e.g. "30B49EAE34C4")
+std::string GetLocalMacAddress();
+
 } // namespace ipmsg

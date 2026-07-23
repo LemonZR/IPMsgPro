@@ -11,6 +11,7 @@
 #include <mutex>
 #include <chrono>
 #include <iomanip>
+#include <cctype>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -409,11 +410,47 @@ void MsgMng::ProcessRecvBuffer(const sockaddr_in& fromAddr, const char* data, in
     }
 
     default:
+        // FeiQ (飞秋) inline screenshot fragments are sent with a non-standard
+        // command (0x2000C0 = FILEATTACHOPT + vendor mode bits) that never
+        // matches a standard IPMsg mode. Forward them to the upper layer so the
+        // bridge can reassemble the image. FeiQ fragment body format is:
+        //   "<hexid>|<totalSize>|<offset>|<fragCount>|<fragIndex>|<fragSize>|0|2|0|<mtime>#<data>"
+        if ((msg.command & IPMSG_FILEATTACHOPT) != 0 && !msg.body.empty() &&
+            msg.body.find('|') != std::string::npos &&
+            msg.body.find('#') != std::string::npos &&
+            std::isxdigit((unsigned char)msg.body[0])) {
+            if (onMessageReceived_) {
+                onMessageReceived_(msg);
+            }
+        }
         break;
     }
 }
 
 // ---------- Protocol ----------
+
+// Build a FeiQ (飞秋) style extended version field so our packets look like
+// a FeiQ peer to other clients. Format (same as FeiQ BR_ENTRY):
+//   1_lbt6_0#128#<MAC>#0#0#0#4001#9
+//   - 1            : IPMsg protocol version (fixed)
+//   - _lbt6_       : FeiQ capability tag (enhanced broadcast)
+//   - 0            : flag
+//   - 128          : user-limit / flag
+//   - <MAC>        : local adapter MAC, uppercase, no separators
+//   - 0/0/0        : reserved
+//   - 4001         : FeiQ software version (4.0.0.1)
+//   - 9            : build number
+// The leading "1" is what the standard IPMsg parser reads as the version,
+// so existing peers still interoperate.
+static std::string BuildFeiQVersion() {
+    static std::string cached;
+    if (!cached.empty()) return cached;
+
+    std::string mac = ipmsg::GetLocalMacAddress();
+    if (mac.empty()) mac = "000000000000";
+    cached = "1_lbt6_0#128#" + mac + "#0#0#0#4001#9";
+    return cached;
+}
 
 std::string MsgMng::MakeMsg(uint64_t packetNo, uint32_t command,
                              const std::string& msg, const std::string& extra) {
@@ -443,7 +480,8 @@ std::string MsgMng::MakeMsg(uint64_t packetNo, uint32_t command,
     std::string result;
     result.reserve(MAX_UDPBUF);
 
-    result += std::to_string(IPMSG_VERSION) + ":";
+    // Use FeiQ-style extended version field for better compatibility with FeiQ peers.
+    result += BuildFeiQVersion() + ":";
     result += std::to_string(packetNo) + ":";
     result += userName + ":";
     result += hostName + ":";
@@ -561,8 +599,23 @@ bool MsgMng::ResolveMsg(const char* buf, int size,
 
     uint32_t mode = GET_MODE(out.command);
 
-    // Find null byte separating body from extra
-    int bodyStrLen = static_cast<int>(strnlen(bodyPtr, bodyLen));
+    // Find null byte separating body from extra.
+    // NOTE: FeiQ inline screenshot fragments (cmd FILEATTACHOPT + non-standard mode)
+    // carry the raw JPEG bytes after a '#' separator, and those bytes may contain
+    // embedded NULs (JPEG frequently does). strnlen would truncate at the first NUL
+    // and we'd lose the entire image. So for FeiQ fragments we keep the full raw
+    // payload (bodyPtr .. size) without truncation.
+    bool isFeiQFragment = (out.command & IPMSG_FILEATTACHOPT) != 0 &&
+                          bodyLen > 0 &&
+                          std::isxdigit((unsigned char)bodyPtr[0]) &&
+                          std::memchr(bodyPtr, '#', bodyLen) != nullptr;
+
+    int bodyStrLen;
+    if (isFeiQFragment) {
+        bodyStrLen = bodyLen;  // keep embedded NULs intact
+    } else {
+        bodyStrLen = static_cast<int>(strnlen(bodyPtr, bodyLen));
+    }
     out.body = std::string(bodyPtr, bodyStrLen);
 
     // Convert body to UTF-8 if sender is not using UTF-8 (e.g. FeiQ sends GBK)

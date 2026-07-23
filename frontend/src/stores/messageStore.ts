@@ -7,6 +7,12 @@ import { Message, FileInfoAttachment, FileReceiveRequestEvent, User } from '../t
 import { invoke, listen } from '../services/bridge';
 import { useUserStore } from './userStore';
 
+// Module-level dedupe for FeiQ screenshots. Lives outside the store closure so it
+// stays effective even if initMessageListeners is (accidentally) registered twice
+// (e.g. React StrictMode in dev). Keyed by sender+size+dataUrl length, 2s window.
+let lastFeiqSig = '';
+let lastFeiqAt = 0;
+
 /** Pending file receive request */
 export interface PendingFileReceive {
   id: string;            // unique ID for this request
@@ -836,6 +842,64 @@ updateTransferProgress: (transferId, progress, isSending) => {
         }
         return { messages: newMessages, messageVersion: state.messageVersion + 1 };
       });
+    }));
+
+    // Listen for FeiQ inline screenshots, which are reassembled entirely on the
+    // backend and delivered as a finished image (inline base64 data URL). This
+    // bypasses the standard "accept file" UI used by normal file transfers.
+    // Guard against duplicate delivery (UDP retransmit / accidental double listener).
+    unsubs.push(listen('feiq.screenshot_received', (data: any) => {
+      console.log(`[FEIQ_SHOT] from=${data.fromUser?.id}, fileName=${data.fileName}, size=${data.fileSize}`);
+
+      // Dedupe: the same screenshot delivered twice (retransmit or double listener)
+      // would otherwise create two preview records. Key by sender+size+dataUrl length.
+      const sig = `${data.fromUser?.id}|${data.fileSize}|${(data.dataUrl || '').length}`;
+      const now = Date.now();
+      if (sig === lastFeiqSig && now - lastFeiqAt < 2000) {
+        console.log('[FEIQ_SHOT] Duplicate delivery ignored (same sig within 2s)');
+        return;
+      }
+      lastFeiqSig = sig;
+      lastFeiqAt = now;
+
+      // Auto-add the sender to the contact list if missing, and auto-select so
+      // the incoming screenshot becomes visible immediately.
+      if (data.fromUser) {
+        const userStore = useUserStore.getState();
+        const exists = userStore.users.some(u => u.id === data.fromUser.id);
+        if (!exists) {
+          userStore.addUser({
+            id: data.fromUser.id,
+            nickname: data.fromUser.nickname || data.fromUser.username || data.fromUser.id.split('@')[0],
+            username: data.fromUser.username || '',
+            hostname: data.fromUser.hostname || '',
+            group: data.fromUser.group || '',
+            ip: data.fromUser.ip || '',
+            port: data.fromUser.port || 0,
+            status: 'online',
+            version: data.fromUser.version || '',
+          });
+        }
+        const current = userStore.currentUser;
+        if (!current || current.id !== data.fromUser.id) {
+          const sender = userStore.users.find(u => u.id === data.fromUser.id);
+          if (sender) userStore.setCurrentUser(sender);
+        }
+      }
+
+      const msg: Message = {
+        id: `feiq_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        from: data.fromUser?.id || 'unknown',
+        to: 'self',
+        content: data.dataUrl,
+        type: 'image',
+        timestamp: Date.now(),
+        status: 'delivered',
+        fromUser: data.fromUser,
+        fileInfo: { fileName: data.fileName, fileSize: data.fileSize || 0, filePath: data.savePath },
+        transferProgress: 100,
+      };
+      get().recvMessage(msg);
     }));
 
     return () => {

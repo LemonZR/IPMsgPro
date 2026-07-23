@@ -145,4 +145,37 @@ std::string GetUserName() {
     return buf;
 }
 
+std::string GetLocalMacAddress() {
+    std::string mac;
+
+    ULONG bufLen = 0;
+    GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                         GAA_FLAG_SKIP_DNS_SERVER, nullptr, nullptr, &bufLen);
+    if (bufLen == 0) return mac;
+
+    std::vector<uint8_t> buffer(bufLen);
+    auto adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+    ULONG ret = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     GAA_FLAG_SKIP_DNS_SERVER, nullptr, adapters, &bufLen);
+    if (ret != ERROR_SUCCESS) return mac;
+
+    for (auto adapter = adapters; adapter; adapter = adapter->Next) {
+        if (adapter->OperStatus != IfOperStatusUp) continue;
+        if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        if (adapter->PhysicalAddressLength == 0) continue;
+
+        // Format as uppercase hex without separators, e.g. "30B49EAE34C4"
+        char hex[18] = {};
+        static const char* digits = "0123456789ABCDEF";
+        for (ULONG i = 0; i < adapter->PhysicalAddressLength && i < 6; ++i) {
+            hex[i * 2]     = digits[(adapter->PhysicalAddress[i] >> 4) & 0xF];
+            hex[i * 2 + 1] = digits[adapter->PhysicalAddress[i] & 0xF];
+        }
+        mac = hex;
+        break;
+    }
+
+    return mac;
+}
+
 } // namespace ipmsg
