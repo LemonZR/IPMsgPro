@@ -1859,6 +1859,28 @@ void CommandHandler::FinalizeFeiQScreenshot(const std::string& id) {
                 buf = std::move(bmp);
                 ext = "bmp";
                 uint32_t actualCrc = Crc32(dib);
+                // DIAG: dump the DIB header fields that affect the pixel start
+                // offset, plus the first pixel bytes. For a solid-color image the
+                // first row should be the solid color (not garbage); mismatch
+                // here pinpoints where the parsing goes wrong (header vs palette
+                // vs row stride). Also keep the raw decoded DIB for offline view.
+                {
+                    std::ofstream dibF(GetUserDownloadsDir() + "/FeiQ_DecodedDIB_" + id + ".bin", std::ios::binary);
+                    if (dibF) dibF.write(dib.data(), (std::streamsize)dib.size());
+                }
+                uint32_t biCompression = le32(dib, 16);
+                uint32_t biSizeImage    = le32(dib, 20);
+                uint32_t biClrUsed      = le32(dib, 32);
+                std::ostringstream px;
+                px << "[FEIQ-SHOT] DIB head: biSize=" << biSize
+                   << " biCompression=" << biCompression
+                   << " biClrUsed=" << biClrUsed
+                   << " biSizeImage=" << biSizeImage
+                   << " pixelStart=" << biSize << " firstPixels=";
+                size_t px0 = (size_t)biSize;
+                for (size_t i = 0; i + px0 < dib.size() && i < 32; ++i)
+                    px << std::hex << (int)(unsigned char)dib[px0 + i] << " ";
+                LogMessage("BRIDGE", "", px.str());
                 LogMessage("BRIDGE", "", "[FEIQ-SHOT] LZW decoded BMP: DIB=" +
                     std::to_string(dib.size()) + " expected=" + std::to_string(expectedOut) +
                     " crc=" + std::to_string(actualCrc) +
