@@ -92,6 +92,8 @@ Desktop.ini
 build/
 Build/
 build-*/
+build_x64/
+build_x86/
 
 # CMake generated files
 CMakeFiles/
