@@ -1172,7 +1172,7 @@ nlohmann::json CommandHandler::HandleFileAccept(const nlohmann::json& args) {
     // If savePath is empty, auto-generate using the user's Downloads folder
     if (savePath.empty() && !fileName.empty()) {
         std::string saveDir = GetUserDownloadsDir();
-        CreateDirectoryA(saveDir.c_str(), nullptr);
+        CreateDirectoryW(Utf8ToWide(saveDir).c_str(), nullptr);
         savePath = saveDir + "\\" + fileName;
     }
     LogMessage("BRIDGE", "", "[BACKEND-ACCEPT] savePath=" + savePath);
@@ -1483,9 +1483,22 @@ std::string GetUserDownloadsDir() {
     // e.g. C:\Users\<user>\Downloads. Use USERPROFILE (the documented
     // location) to avoid depending on shell known-folder CSIDL constants
     // that may be unavailable with WIN32_LEAN_AND_MEAN.
-    char userProfile[MAX_PATH] = {};
-    if (GetEnvironmentVariableA("USERPROFILE", userProfile, MAX_PATH) > 0) {
-        return std::string(userProfile) + "\\Downloads";
+    //
+    // IMPORTANT: return the path as UTF-8. Downstream code (the receive
+    // save-path in RecvFileThread -> PathFromUtf8, and the FeiQ screenshot
+    // save -> std::filesystem::u8path) all expect UTF-8. Using the *A (ANSI)
+    // variant would yield code-page (GBK) bytes that fail to map for
+    // non-ASCII user names (e.g. C:\Users\冯波\Downloads), causing
+    // "Access is denied" / "No mapping for the Unicode character" errors.
+    wchar_t userProfile[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH) > 0) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, userProfile, -1, nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            std::string utf8(len, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, userProfile, -1, &utf8[0], len, nullptr, nullptr);
+            if (!utf8.empty() && utf8.back() == '\0') utf8.pop_back();
+            return utf8 + "\\Downloads";
+        }
     }
     return "Downloads";
 }

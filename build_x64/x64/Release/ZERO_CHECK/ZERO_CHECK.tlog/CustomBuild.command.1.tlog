@@ -1,0 +1,10 @@
+^D:\WORK\CPLUSPLUS\IPMSGPRO\BUILD_X64\CMAKEFILES\C76678FA548DB887318716F532DAB3E7\GENERATE.STAMP.RULE
+setlocal
+C:\cmake-4.0.3-windows-x86_64\bin\cmake.exe -SD:/Work/CPlusPlus/IPMsgPro -BD:/Work/CPlusPlus/IPMsgPro/build_x64 --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/Work/CPlusPlus/IPMsgPro/build_x64/IPMsgPro.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

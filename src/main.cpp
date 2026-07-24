@@ -70,6 +70,18 @@ static std::string GetAppDataDir(int port) {
     return dir;
 }
 
+// Convert a UTF-8 path to a wide string for Win32 *W APIs (so paths with
+// non-ASCII user names like C:\Users\冯波\Downloads work correctly).
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return {};
+    std::wstring wstr(wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wstr[0], wlen);
+    if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
+    return wstr;
+}
+
 // ============================================================================
 // Helper: Parse colon-separated file attachment fields (:: escaped colons)
 // ============================================================================
@@ -172,7 +184,7 @@ static void RunCliServer(int port) {
 
                     // Generate save path
                     std::string saveDir = ipmsg::GetUserDownloadsDir();
-                    CreateDirectoryA(saveDir.c_str(), nullptr);
+                    CreateDirectoryW(Utf8ToWide(saveDir).c_str(), nullptr);
                     std::string savePath = saveDir + "\\" + fileName;
 
                     // Start receiving - use correct sender port
@@ -325,7 +337,7 @@ static void RunCliTestRunner(int port, const std::string& configPath,
                              std::to_string(fileSize) + " bytes)");
 
                     std::string saveDir = ipmsg::GetUserDownloadsDir();
-                    CreateDirectoryA(saveDir.c_str(), nullptr);
+                    CreateDirectoryW(Utf8ToWide(saveDir).c_str(), nullptr);
                     std::string savePath = saveDir + "\\" + fileName;
 
                     std::string recvTransferId = g_fileTransfer->StartRecvFile(

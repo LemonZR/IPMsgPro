@@ -24,6 +24,26 @@ namespace ipmsg {
 
 namespace fs = std::filesystem;
 
+// Convert a UTF-8 path string to a wide string. The backend receives paths from
+// the frontend as UTF-8 (which may contain Chinese user names / file names, e.g.
+// "C:\\Users\\冯波\\Downloads"). Building std::filesystem::path directly from a
+// UTF-8 std::string via the deprecated u8path() mis-handles the encoding on MSVC
+// and triggers "No mapping for the Unicode character exists in the target
+// multi-byte code page" when the path is opened. Going through an explicit
+// UTF-16 (std::wstring) keeps everything on the wide API path (CreateFileW etc.).
+static std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    if (len <= 0) return {};
+    std::wstring w(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), &w[0], len);
+    return w;
+}
+
+static fs::path PathFromUtf8(const std::string& s) {
+    return fs::path(Utf8ToWide(s));
+}
+
 FileTransferManager::FileTransferManager() = default;
 
 FileTransferManager::~FileTransferManager() {
@@ -341,9 +361,9 @@ void FileTransferManager::HandleClientConnection(SOCKET clientSocket,
     // Fallback by fileId alone is dangerous since fileId=0 for all files
 
     LogMessage("FILE_XFER", "", "File path resolved: '" + filePath + "', matchedTransferId=" + matchedTransferId +
-                     ", exists=" + (filePath.empty() ? "N/A(empty)" : (fs::exists(fs::u8path(filePath)) ? "yes" : "NO")));
+                     ", exists=" + (filePath.empty() ? "N/A(empty)" : (fs::exists(PathFromUtf8(filePath)) ? "yes" : "NO")));
 
-    if (filePath.empty() || !fs::exists(fs::u8path(filePath))) {
+    if (filePath.empty() || !fs::exists(PathFromUtf8(filePath))) {
         LogMessage("FILE_XFER", "", "File NOT found for GETFILEDATA! reqPacketNo=" + std::to_string(reqPacketNo) +
                          ", fileId=" + std::to_string(fileId) + ", filePath='" + filePath + "'");
         closesocket(clientSocket);
@@ -372,8 +392,8 @@ std::string FileTransferManager::StartSendFile(const std::string& targetIp, int 
                                                 const std::string& toUser) {
     if (!ready_) return "";
 
-    // Check if file exists（用 u8path 正确解析 UTF-8 路径）
-    if (!fs::exists(fs::u8path(filePath))) {
+    // Check if file exists
+    if (!fs::exists(PathFromUtf8(filePath))) {
         LogMessage("FILE_XFER", "", "[FileTransfer] File not found: " + filePath);
         return "";
     }
@@ -381,8 +401,8 @@ std::string FileTransferManager::StartSendFile(const std::string& targetIp, int 
     // Generate transfer ID
     std::string transferId = GenerateTransferId();
 
-    // Get file info（u8path 确保 UTF-8 中文路径正确解析）
-    fs::path path(fs::u8path(filePath));
+    // Get file info (use wide-aware path so Chinese paths resolve correctly)
+    fs::path path(PathFromUtf8(filePath));
     // ★ 修复：使用 u8string() 获取 UTF-8 文件名，而非 string()（后者在 Windows 上用本地代码页 GBK，
     // 会产生非法 UTF-8，导致 Bridge::Emit 的 JSON dump 抛异常、进度事件无法送达前端）
     std::string fileName = path.filename().u8string();
@@ -401,7 +421,7 @@ std::string FileTransferManager::StartSendFile(const std::string& targetIp, int 
         }
     }
 
-    int64_t fileSize = fs::file_size(fs::u8path(filePath));
+    int64_t fileSize = fs::file_size(PathFromUtf8(filePath));
 
     // Create transfer record
     TransferProgress transfer;
@@ -449,8 +469,8 @@ void FileTransferManager::SendFileThread(const std::string& transferId, SOCKET c
     // Update status to transferring
     UpdateTransferProgress(transferId, 0, TransferStatus::Transferring);
 
-    // Open file（u8path 支持中文路径）
-    std::ifstream file(fs::u8path(filePath), std::ios::binary);
+    // Open file (wide-aware path so Chinese source paths work)
+    std::ifstream file(PathFromUtf8(filePath), std::ios::binary);
     if (!file.is_open()) {
         LogMessage("FILE_XFER", "", "Failed to open file: " + filePath);
         UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
@@ -590,12 +610,12 @@ void FileTransferManager::RecvFileThread(const std::string& transferId, const st
     // Update status to transferring
     UpdateTransferProgress(transferId, 0, TransferStatus::Transferring);
 
-    // Create directory if not exists（u8path 支持中文路径）
-    fs::path path(fs::u8path(savePath));
+    // Create directory if not exists (wide-aware path for Chinese directories)
+    fs::path path(PathFromUtf8(savePath));
     fs::create_directories(path.parent_path());
 
-    // Open file for writing（u8path 支持中文保存文件名）
-    std::ofstream file(fs::u8path(savePath), std::ios::binary);
+    // Open file for writing (wide-aware path so Chinese save paths work)
+    std::ofstream file(PathFromUtf8(savePath), std::ios::binary);
     if (!file.is_open()) {
         LogMessage("FILE_XFER", "", "Failed to create file: " + savePath);
         UpdateTransferProgress(transferId, 0, TransferStatus::Failed);
