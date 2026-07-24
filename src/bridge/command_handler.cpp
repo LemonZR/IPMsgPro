@@ -29,8 +29,93 @@
 #include <shlobj.h>
 #include <thread>
 #include <filesystem>
+#include <gdiplus.h>
+#include <objidl.h>
+#include <commdlg.h>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
+using namespace Gdiplus;
+
+// ============================================================================
+// Base64 encode/decode helpers (used by screenshot.capture and file.save_data)
+// ============================================================================
+static std::string Base64Encode(const std::string& in) {
+    static const char* tbl =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((in.size() + 2) / 3) * 4);
+    size_t i = 0;
+    while (i + 3 <= in.size()) {
+        uint32_t n = ((uint32_t)(unsigned char)in[i] << 16) |
+                     ((uint32_t)(unsigned char)in[i + 1] << 8) |
+                     (uint32_t)(unsigned char)in[i + 2];
+        out.push_back(tbl[(n >> 18) & 0x3F]);
+        out.push_back(tbl[(n >> 12) & 0x3F]);
+        out.push_back(tbl[(n >> 6) & 0x3F]);
+        out.push_back(tbl[n & 0x3F]);
+        i += 3;
+    }
+    size_t rem = in.size() - i;
+    if (rem == 1) {
+        uint32_t n = (uint32_t)(unsigned char)in[i] << 16;
+        out.push_back(tbl[(n >> 18) & 0x3F]);
+        out.push_back(tbl[(n >> 12) & 0x3F]);
+        out.push_back('=');
+        out.push_back('=');
+    } else if (rem == 2) {
+        uint32_t n = ((uint32_t)(unsigned char)in[i] << 16) |
+                     ((uint32_t)(unsigned char)in[i + 1] << 8);
+        out.push_back(tbl[(n >> 18) & 0x3F]);
+        out.push_back(tbl[(n >> 12) & 0x3F]);
+        out.push_back(tbl[(n >> 6) & 0x3F]);
+        out.push_back('=');
+    }
+    return out;
+}
+
+// Base64 decoder (inverse of Base64Encode). Used by file.save_data.
+static std::string Base64Decode(const std::string& in) {
+    static const std::string tbl =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+    std::string out;
+    int i = 0, j = 0;
+    int in_len = (int)in.size();
+    char c4[4], c3[3];
+    while (in_len-- && in[i] != '=' && (isalnum((unsigned char)in[i]) || in[i] == '+' || in[i] == '/')) {
+        c4[j++] = in[i++];
+        if (j == 4) {
+            for (j = 0; j < 4; j++) c4[j] = (char)tbl.find(c4[j]);
+            c3[0] = (char)((c4[0] << 2) + ((c4[1] & 0x30) >> 4));
+            c3[1] = (char)(((c4[1] & 0xf) << 4) + ((c4[2] & 0x3c) >> 2));
+            c3[2] = (char)(((c4[2] & 0x3) << 6) + c4[3]);
+            for (j = 0; j < 3; j++) out += c3[j];
+            j = 0;
+        }
+    }
+    if (j) {
+        for (int k = j; k < 4; k++) c4[k] = 0;
+        for (int k = 0; k < 4; k++) c4[k] = (char)tbl.find(c4[k]);
+        c3[0] = (char)((c4[0] << 2) + ((c4[1] & 0x30) >> 4));
+        c3[1] = (char)(((c4[1] & 0xf) << 4) + ((c4[2] & 0x3c) >> 2));
+        c3[2] = (char)(((c4[2] & 0x3) << 6) + c4[3]);
+        for (int k = 0; k < j - 1; k++) out += c3[k];
+    }
+    return out;
+}
+
+// CRC32 (IEEE 802.3) for diagnostics / DIB integrity checks.
+static uint32_t Crc32(const std::string& data) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (unsigned char c : data) {
+        crc ^= c;
+        for (int i = 0; i < 8; ++i)
+            crc = (crc & 1) ? (0xEDB88320 ^ (crc >> 1)) : (crc >> 1);
+    }
+    return crc ^ 0xFFFFFFFF;
+}
 
 // ============================================================================
 // Utility: Convert GBK to UTF-8 on Windows
@@ -225,6 +310,248 @@ void CommandHandler::SetWindow(tauricpp::Window* window) {
     LogMessage("BRIDGE", "", "[WINDOW] SetWindow called");
 }
 
+// ============================================================================
+// FeiQ inline screenshot SEND channel
+// ============================================================================
+//
+// IMPORTANT (verified against a real FeiQ capture): modern FeiQ sends inline
+// screenshots as RAW JPEG bytes. The fragment payload is the JPEG file directly
+// (magic 0xFFD8FFE0), NOT the legacy "LZW!" + DIB wrapper. The fragment header
+// layout is:
+//     "<id>|<total>|<off>|<fragCount>|<fragIndex>|<len>|0|2|0|<mtime>#"
+// followed IMMEDIATELY by the raw JPEG chunk (NO leading 0x00). The reference
+// message is a RICH-TEXT message whose body embeds the inline-image marker
+// "/~#><id>" inside FeiQ's font/object placeholder "B~{/font;...}".
+
+// Resolve a GDI+ image encoder CLSID by its MIME type.
+static bool GetEncoderClsid(const wchar_t* mime, CLSID& clsid) {
+    UINT num = 0, size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size == 0) return false;
+    auto* buf = (Gdiplus::ImageCodecInfo*)malloc(size);
+    if (!buf) return false;
+    Gdiplus::GetImageEncoders(num, size, buf);
+    bool found = false;
+    for (UINT i = 0; i < num; ++i) {
+        if (wcscmp(buf[i].MimeType, mime) == 0) { clsid = buf[i].Clsid; found = true; break; }
+    }
+    free(buf);
+    return found;
+}
+
+// GDI+ is initialized lazily and kept alive for the process lifetime. The
+// screenshot-capture path starts/stops GDI+ locally, so Bitmap::FromStream in
+// this file would otherwise run with GDI+ uninitialized and fail silently.
+static bool EnsureGdiplus() {
+    static ULONG_PTR token = 0;
+    static int started = 0;
+    if (!started) {
+        Gdiplus::GdiplusStartupInput input;
+        if (Gdiplus::GdiplusStartup(&token, &input, NULL) == Gdiplus::Ok) started = 1;
+    }
+    return started != 0;
+}
+
+static uint32_t ReadLE32(const std::string& s, size_t o) {
+    if (o + 4 > s.size()) return 0;
+    return (uint32_t)(unsigned char)s[o]
+         | ((uint32_t)(unsigned char)s[o + 1] << 8)
+         | ((uint32_t)(unsigned char)s[o + 2] << 16)
+         | ((uint32_t)(unsigned char)s[o + 3] << 24);
+}
+
+// Decode a base64 PNG data URL (from the frontend screenshot editor) into a
+// 24-bit bottom-up DIB (BITMAPINFOHEADER + pixel data, NO file header). FeiQ
+// renders inline screenshots as an LZW-compressed 24/32-bit DIB, so we must
+// hand it a DIB, not a JPEG.
+static bool PngDataUrlTo24bppDib(const std::string& dataUrl, std::string& dib) {
+    dib.clear();
+    if (!EnsureGdiplus()) return false;
+    std::string b64;
+    auto comma = dataUrl.find(',');
+    if (comma != std::string::npos) b64 = dataUrl.substr(comma + 1);
+    else b64 = dataUrl;
+    std::string png = Base64Decode(b64);
+    if (png.empty()) return false;
+
+    HGLOBAL hG = GlobalAlloc(GMEM_MOVEABLE, png.size());
+    if (!hG) return false;
+    memcpy(GlobalLock(hG), png.data(), png.size());
+    GlobalUnlock(hG);
+
+    IStream* pStream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(hG, TRUE, &pStream))) { GlobalFree(hG); return false; }
+
+    Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromStream(pStream);
+    bool ok = false;
+    if (bmp && bmp->GetLastStatus() == Gdiplus::Ok) {
+        HBITMAP hBmp = NULL;
+        if (bmp->GetHBITMAP(Gdiplus::Color(0, 0, 0), &hBmp) == Gdiplus::Ok && hBmp) {
+            BITMAP bm;
+            if (GetObject(hBmp, sizeof(bm), &bm) == sizeof(bm)) {
+                int w = bm.bmWidth, h = bm.bmHeight;
+                if (w > 0 && h > 0) {
+                    BITMAPINFOHEADER bi = { 0 };
+                    bi.biSize = 40;
+                    bi.biWidth = w;
+                    bi.biHeight = h;          // positive => bottom-up DIB
+                    bi.biPlanes = 1;
+                    bi.biBitCount = 24;
+                    bi.biCompression = 0;
+                    int rowBytes = ((w * 3 + 3) / 4) * 4;
+                    bi.biSizeImage = (uint32_t)(rowBytes * h);
+                    HDC hdc = GetDC(NULL);
+                    if (hdc) {
+                    dib.resize(40 + bi.biSizeImage);
+                    if (GetDIBits(hdc, hBmp, 0, h, (void*)(dib.data() + 40),
+                                  (BITMAPINFO*)&bi, DIB_RGB_COLORS)) {
+                        // GetDIBits writes the pixels into dib+40 but updates the
+                        // BITMAPINFOHEADER in `bi`; the DIB FeiQ reads starts with a
+                        // valid 40-byte header, so copy it to the front of the buffer.
+                        memcpy((void*)dib.data(), &bi, 40);
+                        ok = true;
+                    }
+                        ReleaseDC(NULL, hdc);
+                    }
+                }
+            }
+            DeleteObject(hBmp);
+        }
+    }
+    delete bmp;
+    if (pStream) pStream->Release();
+    GlobalFree(hG);
+    return ok;
+
+}
+
+// Read width/height from a JPEG's SOF marker (best-effort; returns false if it
+// cannot be determined). Used to fill FeiQ's inline-image placeholder sizing.
+static bool JpegDimensions(const std::string& jpeg, int& w, int& h) {
+    w = 0; h = 0;
+    if (jpeg.size() < 4 || (uint8_t)jpeg[0] != 0xFF || (uint8_t)jpeg[1] != 0xD8) return false;
+    size_t i = 2;
+    while (i + 9 < jpeg.size()) {
+        if ((uint8_t)jpeg[i] != 0xFF) { i++; continue; }
+        uint8_t marker = (uint8_t)jpeg[i + 1];
+        // SOF markers (exclude DHT=0xC4, DAC=0xC8, lossless variants we don't need).
+        if (marker >= 0xC0 && marker <= 0xCF &&
+            marker != 0xC4 && marker != 0xC8 && marker != 0xCC) {
+            h = ((uint8_t)jpeg[i + 5] << 8) | (uint8_t)jpeg[i + 6];
+            w = ((uint8_t)jpeg[i + 7] << 8) | (uint8_t)jpeg[i + 8];
+            return w > 0 && h > 0;
+        }
+        int len = ((uint8_t)jpeg[i + 2] << 8) | (uint8_t)jpeg[i + 3];
+        if (len <= 0) break;
+        i += 2 + (size_t)len;
+    }
+    return false;
+}
+
+// Forward declarations (defined later, after LzwDecompress).
+static bool LzwCompress(const std::string& in, std::string& out);
+static bool LzwDecompress(const std::string& in, size_t inOff, size_t inLen,
+                          int minCodeSize, size_t expectedOut, std::string& out);
+
+nlohmann::json CommandHandler::HandleFeiQScreenshotSend(const nlohmann::json& args) {
+    nlohmann::json r; r["success"] = false;
+    try {
+        std::string targetArg = args.contains("target") && args["target"].is_string()
+            ? args["target"].get<std::string>() : "<none>";
+        LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] ENTER target=\"" + targetArg + "\" hasDataUrl=" +
+            (args.contains("dataUrl") && args["dataUrl"].is_string() ? "yes" : "no"));
+        auto target = FindUserFromArgs(args);
+        if (!target) {
+            LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] FIND TARGET FAILED for=\"" + targetArg + "\"");
+            r["error"] = "未找到目标用户"; return r;
+        }
+        LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] target resolved key=" + target->Key() +
+            " ip=" + target->ipAddress);
+        if (!args.contains("dataUrl") || !args["dataUrl"].is_string()) {
+            r["error"] = "缺少图片数据"; return r;
+        }
+
+        // FeiQ renders inline screenshots as an LZW-compressed DIB -- EXACTLY the
+        // format it sends to us: "LZW!" + uint32 LE (DIB size) + uint32 LE (CRC32
+        // of DIB) + LZW(DIB). We must emit this, NOT a raw JPEG.
+        std::string dib;
+        if (!PngDataUrlTo24bppDib(args["dataUrl"].get<std::string>(), dib)) {
+            r["error"] = "图片编码失败"; return r;
+        }
+        int dw = (int)ReadLE32(dib, 4);
+        int dh = (int)(int32_t)ReadLE32(dib, 8);
+        LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] DIB bytes=" + std::to_string(dib.size()) +
+            " w=" + std::to_string(dw) + " h=" + std::to_string(dh));
+
+        uint32_t crc = Crc32(dib);
+        std::string lzw;
+        if (!LzwCompress(dib, lzw)) { r["error"] = "压缩失败"; return r; }
+
+        // Self-check: our compressor MUST be decodable by the same LZW variant
+        // FeiQ uses (our LzwDecompress mirrors it). If round-trip fails, the peer
+        // could never decode our payload either -- abort and report instead of
+        // sending a broken screenshot.
+        {
+            std::string round;
+            if (!LzwDecompress(lzw, 0, lzw.size(), 8, dib.size(), round) || round != dib) {
+                LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] SELFCHECK LZW round-trip MISMATCH (out=" +
+                    std::to_string(round.size()) + " expected=" + std::to_string(dib.size()) + ")");
+                r["error"] = "LZW 自检失败"; return r;
+            }
+            LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] SELFCHECK LZW round-trip OK (" +
+                std::to_string(lzw.size()) + " bytes compressed)");
+        }
+
+        std::string payload = "LZW!";
+        auto appendU32 = [&](uint32_t v) {
+            payload.push_back((char)(v & 0xFF));
+            payload.push_back((char)((v >> 8) & 0xFF));
+            payload.push_back((char)((v >> 16) & 0xFF));
+            payload.push_back((char)((v >> 24) & 0xFF));
+        };
+        appendU32((uint32_t)dib.size());
+        appendU32(crc);
+        payload += lzw;
+        LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] payload=" + std::to_string(payload.size()) +
+            " (LZW=" + std::to_string(lzw.size()) + ")");
+
+        // FeiQ fragments the payload into 512-byte chunks (verified against a live
+        // capture). Larger UDP datagrams get IP-fragmented and dropped, so FeiQ
+        // never reassembles the image.
+        // Diagnostics: dump the DIB we generated (for offline comparison with what
+        // FeiQ itself sends) before emitting.
+        {
+            static unsigned dibSeq = 0;
+            char db[16]; snprintf(db, sizeof(db), "%08X", ++dibSeq);
+            std::ofstream o2(GetUserDownloadsDir() + "/FeiQ_OurTX_dib_" + std::string(db) + ".bin", std::ios::binary);
+            if (o2) o2.write(dib.data(), (std::streamsize)dib.size());
+        }
+
+        // FeiQ sends the inline-image reference with command 0x00000121
+        // (IPMSG_SENDMSG | IPMSG_SENDCHECKOPT | 0x1).
+        const uint32_t kFeiQRefCmd = IPMSG_SENDMSG | IPMSG_SENDCHECKOPT | 0x1; // 0x121
+
+        // Emit the inline screenshot to the peer using the fragmented FeiQ protocol.
+        SendFeiQShotPayload(*target, payload, dw, dh, kFeiQRefCmd, IPMSG_FILEATTACHOPT | 0xC0);
+        r["success"] = true;
+        r["fragments"] = (int)((payload.size() + 511) / 512);
+    } catch (const std::exception& e) {
+        r["error"] = e.what();
+    }
+    return r;
+}
+
+nlohmann::json CommandHandler::HandleWindowSetAlwaysOnTop(const nlohmann::json& args) {
+    nlohmann::json r; r["success"] = true;
+    try {
+        bool onTop = args.contains("on_top") ? args["on_top"].get<bool>() : true;
+        if (window_) window_->SetAlwaysOnTop(onTop);
+    } catch (const std::exception& e) {
+        r["success"] = false; r["error"] = e.what();
+    }
+    return r;
+}
+
 void CommandHandler::RegisterAllCommands() {
     if (!bridge_) return;
 
@@ -283,6 +610,24 @@ void CommandHandler::RegisterAllCommands() {
         [this](const nlohmann::json& args) { return HandleDialogOpen(args); });
     bridge_->RegisterCommand("shell_open",
         [this](const nlohmann::json& args) { return HandleShellOpen(args); });
+
+    // --- Screenshot commands ---
+    bridge_->RegisterCommand("screenshot.capture",
+        [this](const nlohmann::json& args) { return HandleScreenshotCapture(args); });
+    bridge_->RegisterCommand("window.maximize",
+        [this](const nlohmann::json& args) { return HandleWindowMaximize(args); });
+    bridge_->RegisterCommand("window.restore",
+        [this](const nlohmann::json& args) { return HandleWindowRestore(args); });
+    bridge_->RegisterCommand("window.set_always_on_top",
+        [this](const nlohmann::json& args) { return HandleWindowSetAlwaysOnTop(args); });
+    bridge_->RegisterCommand("feiq.screenshot_send",
+        [this](const nlohmann::json& args) { return HandleFeiQScreenshotSend(args); });
+    bridge_->RegisterCommand("feiq.echo_screenshot",
+        [this](const nlohmann::json& args) { return HandleFeiQEchoScreenshot(args); });
+    bridge_->RegisterCommand("dialog.save",
+        [this](const nlohmann::json& args) { return HandleDialogSave(args); });
+    bridge_->RegisterCommand("file.save_data",
+        [this](const nlohmann::json& args) { return HandleFileSaveData(args); });
 
 }
 
@@ -1277,6 +1622,253 @@ nlohmann::json CommandHandler::HandleShellOpen(const nlohmann::json& args) {
     return {{"success", ok}};
 }
 
+// ============================================================================
+// Screenshot support
+// ============================================================================
+
+// Find the PNG image encoder CLSID.
+static bool GetPngEncoderClsid(CLSID* clsid) {
+    UINT num = 0, size = 0;
+    GetImageEncodersSize(&num, &size);
+    if (size == 0) return false;
+    std::vector<ImageCodecInfo> encoders(size / sizeof(ImageCodecInfo));
+    GetImageEncoders(num, size, encoders.data());
+    for (UINT i = 0; i < num; i++) {
+        if (wcscmp(encoders[i].MimeType, L"image/png") == 0) {
+            *clsid = encoders[i].Clsid;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Capture a specific monitor to a PNG, returning the raw encoded bytes.
+static bool CaptureMonitorToPng(HMONITOR hMonitor, std::vector<BYTE>& outPng) {
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfo(hMonitor, &mi)) return false;
+    int left = mi.rcMonitor.left, top = mi.rcMonitor.top;
+    int w = mi.rcMonitor.right - left;
+    int h = mi.rcMonitor.bottom - top;
+    if (w <= 0 || h <= 0) return false;
+
+    HDC hdcScreen = GetDC(NULL);
+    if (!hdcScreen) return false;
+
+    // Create a 32bpp DIB section so we get reliable pixel access.
+    BITMAPINFOHEADER bi = { 0 };
+    bi.biSize = sizeof(BITMAPINFOHEADER);
+    bi.biWidth = w;
+    bi.biHeight = h;          // positive => bottom-up DIB
+    bi.biPlanes = 1;
+    bi.biBitCount = 32;
+    bi.biCompression = BI_RGB;
+    void* pBits = nullptr;
+    HBITMAP hBmp = CreateDIBSection(hdcScreen, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (!hBmp) {
+        ReleaseDC(NULL, hdcScreen);
+        return false;
+    }
+
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    HGDIOBJ old = SelectObject(hdcMem, hBmp);
+    BitBlt(hdcMem, 0, 0, w, h, hdcScreen, left, top, SRCCOPY | CAPTUREBLT);
+    SelectObject(hdcMem, old);
+
+    // Encode via GDI+.
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken = 0;
+    if (GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL) != Ok) {
+        DeleteObject(hBmp);
+        DeleteDC(hdcMem);
+        ReleaseDC(NULL, hdcScreen);
+        return false;
+    }
+
+    bool ok = false;
+    Bitmap* bmp = new Bitmap(w, h, PixelFormat32bppARGB);
+    {
+        BitmapData bmpData;
+        Rect rect(0, 0, w, h);
+        if (bmp->LockBits(&rect, ImageLockModeWrite, PixelFormat32bppARGB, &bmpData) == Ok) {
+            int dstStride = bmpData.Stride;
+            BYTE* dst = (BYTE*)bmpData.Scan0;
+            int srcStride = ((w * 32 + 31) / 32) * 4;
+            for (int y = 0; y < h; y++) {
+                // DIB is bottom-up: row 0 is the bottom row of the image.
+                BYTE* srcRow = (BYTE*)pBits + (h - 1 - y) * srcStride;
+                BYTE* dstRow = dst + y * dstStride;
+                for (int x = 0; x < w; x++) {
+                    BYTE b = srcRow[x * 4 + 0];
+                    BYTE g = srcRow[x * 4 + 1];
+                    BYTE r = srcRow[x * 4 + 2];
+                    BYTE a = srcRow[x * 4 + 3];
+                    DWORD pix = ((a ? a : 0xFF) << 24) | (r << 16) | (g << 8) | b;
+                    *(DWORD*)(dstRow + x * 4) = pix;
+                }
+            }
+            bmp->UnlockBits(&bmpData);
+        }
+
+        CLSID pngClsid;
+        if (GetPngEncoderClsid(&pngClsid)) {
+            IStream* pStream = NULL;
+            if (CreateStreamOnHGlobal(NULL, TRUE, &pStream) == S_OK) {
+                if (bmp->Save(pStream, &pngClsid, NULL) == Ok) {
+                    HGLOBAL hMem = NULL;
+                    if (GetHGlobalFromStream(pStream, &hMem) == S_OK) {
+                        SIZE_T size = GlobalSize(hMem);
+                        void* pData = GlobalLock(hMem);
+                        if (pData) {
+                            outPng.assign((BYTE*)pData, (BYTE*)pData + size);
+                            ok = true;
+                            GlobalUnlock(hMem);
+                        }
+                    }
+                }
+                pStream->Release();
+            }
+        }
+    }
+
+    delete bmp;
+    GdiplusShutdown(gdiplusToken);
+    DeleteObject(hBmp);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
+    return ok;
+}
+
+nlohmann::json CommandHandler::HandleScreenshotCapture(const nlohmann::json& args) {
+    (void)args;
+    if (!hwnd_) {
+        return {{"success", false}, {"error", "Window handle not available"}};
+    }
+    HWND hWnd = static_cast<HWND>(hwnd_);
+
+    // Determine the monitor that currently hosts the window (before we hide it),
+    // so a multi-monitor setup captures the screen the app lives on.
+    RECT winRect = { 0 };
+    GetWindowRect(hWnd, &winRect);
+    int cx = (winRect.left + winRect.right) / 2;
+    int cy = (winRect.top + winRect.bottom) / 2;
+    HMONITOR hMon = MonitorFromPoint({ cx, cy }, MONITOR_DEFAULTTONEAREST);
+    if (!hMon) hMon = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfo(hMon, &mi);
+    int screenCount = GetSystemMetrics(SM_CMONITORS);
+
+    // Hide the window so it does not appear in the capture.
+    if (window_) window_->Hide();
+
+    // Give the OS a moment to repaint the desktop without our window.
+    RedrawWindow(GetDesktopWindow(), NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    Sleep(220);
+
+    std::vector<BYTE> png;
+    bool ok = CaptureMonitorToPng(hMon, png);
+
+    if (!ok) {
+        // Bring the window back (keep its previous state).
+        if (window_) window_->Restore();
+        return {{"success", false}, {"error", "Failed to capture screen"}};
+    }
+
+    // Return the PNG as a data URL (base64). A data: URL is same-origin, so the
+    // frontend can draw it to a canvas and read pixels back (required for
+    // cropping / exporting) without tainting the canvas.
+    std::string imageDataUrl = "data:image/png;base64," +
+        Base64Encode(std::string((const char*)png.data(), png.size()));
+
+    // Bring the window back, maximised, so the editor can go full-screen on the
+    // same monitor the screenshot was taken from.
+    if (window_) window_->Maximize();
+
+    return {
+        {"success", true},
+        {"image", imageDataUrl},
+        {"monitor", {
+            {"x", mi.rcMonitor.left},
+            {"y", mi.rcMonitor.top},
+            {"width", mi.rcMonitor.right - mi.rcMonitor.left},
+            {"height", mi.rcMonitor.bottom - mi.rcMonitor.top}
+        }},
+        {"screenCount", screenCount}
+    };
+}
+
+nlohmann::json CommandHandler::HandleWindowMaximize(const nlohmann::json& args) {
+    (void)args;
+    if (window_) window_->Maximize();
+    return {{"success", true}};
+}
+
+nlohmann::json CommandHandler::HandleWindowRestore(const nlohmann::json& args) {
+    (void)args;
+    if (window_) window_->Restore();
+    return {{"success", true}};
+}
+
+nlohmann::json CommandHandler::HandleDialogSave(const nlohmann::json& args) {
+    if (!hwnd_) {
+        return {{"success", false}, {"error", "Window handle not available"}};
+    }
+    HWND hWnd = static_cast<HWND>(hwnd_);
+    std::wstring title = Utf8ToWide(args.value("title", "保存截图"));
+    std::wstring defaultName = Utf8ToWide(args.value("default_name", "screenshot.png"));
+
+    OPENFILENAMEW ofn = { 0 };
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWnd;
+    ofn.lpstrFilter = L"PNG 图片 (*.png)\0*.png\0所有文件 (*.*)\0*.*\0";
+    wchar_t szFile[MAX_PATH] = { 0 };
+    wcsncpy_s(szFile, defaultName.c_str(), _TRUNCATE);
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = title.c_str();
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+
+    if (GetSaveFileNameW(&ofn)) {
+        std::wstring wpath(szFile);
+        int len = WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), -1, NULL, 0, NULL, NULL);
+        std::string path(len, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), -1, &path[0], len, NULL, NULL);
+        if (!path.empty() && path.back() == '\0') path.pop_back();
+        return {{"success", true}, {"path", path}};
+    }
+    return {{"success", false}, {"cancelled", true}};
+}
+
+nlohmann::json CommandHandler::HandleFileSaveData(const nlohmann::json& args) {
+    std::string base64Data = args.value("data", "");
+    std::string path = args.value("path", "");
+    if (base64Data.empty() || path.empty()) {
+        return {{"success", false}, {"error", "Missing data or path"}};
+    }
+    std::string decoded = Base64Decode(base64Data);
+
+    // Make sure the parent directory exists.
+    fs::path p(path);
+    if (auto parent = p.parent_path(); !parent.empty()) {
+        std::error_code ec;
+        fs::create_directories(parent, ec);
+    }
+
+    {
+        std::ofstream out(path, std::ios::binary);
+        if (!out) {
+            return {{"success", false}, {"error", "Cannot open target path"}};
+        }
+        out.write(decoded.data(), (std::streamsize)decoded.size());
+        out.flush();
+        if (!out) {
+            return {{"success", false}, {"error", "Write failed"}};
+        }
+    }
+    return {{"success", true}, {"path", path}};
+}
+
 nlohmann::json CommandHandler::HandleFileOpenFolder(const nlohmann::json& args) {
     std::string path = args.value("path", "");
     if (path.empty()) {
@@ -1515,51 +2107,6 @@ std::string GetUserDownloadsDir() {
 // We collect the fragments, reassemble the JPEG, save it, and surface it to the
 // frontend exactly like a normal received image (file.receive_request -> file.transfer_completed).
 
-static std::string Base64Encode(const std::string& in) {
-    static const char* tbl =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((in.size() + 2) / 3) * 4);
-    size_t i = 0;
-    while (i + 3 <= in.size()) {
-        uint32_t n = ((uint32_t)(unsigned char)in[i] << 16) |
-                     ((uint32_t)(unsigned char)in[i + 1] << 8) |
-                     (uint32_t)(unsigned char)in[i + 2];
-        out.push_back(tbl[(n >> 18) & 0x3F]);
-        out.push_back(tbl[(n >> 12) & 0x3F]);
-        out.push_back(tbl[(n >> 6) & 0x3F]);
-        out.push_back(tbl[n & 0x3F]);
-        i += 3;
-    }
-    size_t rem = in.size() - i;
-    if (rem == 1) {
-        uint32_t n = (uint32_t)(unsigned char)in[i] << 16;
-        out.push_back(tbl[(n >> 18) & 0x3F]);
-        out.push_back(tbl[(n >> 12) & 0x3F]);
-        out.push_back('=');
-        out.push_back('=');
-    } else if (rem == 2) {
-        uint32_t n = ((uint32_t)(unsigned char)in[i] << 16) |
-                     ((uint32_t)(unsigned char)in[i + 1] << 8);
-        out.push_back(tbl[(n >> 18) & 0x3F]);
-        out.push_back(tbl[(n >> 12) & 0x3F]);
-        out.push_back(tbl[(n >> 6) & 0x3F]);
-        out.push_back('=');
-    }
-    return out;
-}
-
-// CRC32 (IEEE 802.3) for diagnostics.
-static uint32_t Crc32(const std::string& data) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (unsigned char c : data) {
-        crc ^= c;
-        for (int i = 0; i < 8; ++i)
-            crc = (crc & 1) ? (0xEDB88320 ^ (crc >> 1)) : (crc >> 1);
-    }
-    return crc ^ 0xFFFFFFFF;
-}
-
 // FeiQ inline screenshot LZW decoder.
 //
 // Wire format: "LZW!"(4) + uint32 LE decoded DIB size(4) + uint32 LE CRC32(4) + LZW stream.
@@ -1635,6 +2182,214 @@ static bool LzwDecompress(const std::string& in, size_t inOff, size_t inLen,
     return !out.empty();
 }
 
+// LZW compressor that is the exact inverse of LzwDecompress above, so it
+// produces a stream FeiQ (and our own decoder) can decompress. Key details
+// that MUST match the decoder:
+//   * codes are packed LSB-first into the bitstream; bytes are MSB-first.
+//   * dictionary starts with 256 single-byte entries; next index = 256.
+//   * code width starts at 9 and widens using the "early change" convention:
+//     after each emitted code we do index++ and bump when (1<<codeSize)==index
+//     (mirrors the decoder's per-iteration index++ / bump exactly).
+static bool LzwCompress(const std::string& in, std::string& out) {
+    out.clear();
+    if (in.empty()) return false;
+    std::vector<uint8_t> buf;
+    uint32_t cur = 0;
+    int nbits = 0;
+    auto writeCode = [&](int code, int codeSize) {
+        for (int i = 0; i < codeSize; ++i) {
+            int bit = (code >> i) & 1;            // output code LSB first
+            // Pack MSB-first into the byte stream so it matches the decoder's
+            // readCode, which reads bit (7 - (bitPos&7)) i.e. MSB-first per byte.
+            cur = (cur << 1) | (uint32_t)bit;
+            ++nbits;
+            if (nbits == 8) {
+                buf.push_back((uint8_t)cur);
+                cur = 0;
+                nbits = 0;
+            }
+        }
+    };
+
+    // --- Must stay byte-for-byte symmetric with LzwDecompress ---
+    // Decoder reads the FIRST code outside its loop: it does NOT allocate a
+    // dictionary entry and does NOT bump the code width (its index starts at
+    // 257 after that first code). Every subsequent code it reads allocates one
+    // entry and bumps once. So the encoder must: emit the first code WITHOUT
+    // bumping (with index already at 257), and bump exactly once per every
+    // LATER code it emits. The previous version emitted an extra leading
+    // literal + bump, which desynced the dictionary growth and truncated the
+    // stream on decode.
+    int codeSize = 9;
+    int index = 257;                              // mirrors decoder right after code #1
+    int ds = 256;
+    std::unordered_map<std::string, int> dict;
+    for (int i = 0; i < 256; ++i) dict[std::string(1, (char)i)] = i;
+
+    auto bump = [&]() {
+        ++index;
+        if ((1 << codeSize) == index && codeSize < 12) ++codeSize;
+    };
+
+    bool first = true;                           // true until we emit the 1st code
+    std::string w;                               // empty prefix to start
+    for (size_t i = 0; i < in.size(); ++i) {
+        char c = in[i];
+        std::string wc = w + c;
+        auto it = dict.find(wc);
+        if (it != dict.end()) {
+            w = wc;                              // extend the match; do not emit
+        } else {
+            writeCode(dict[w], codeSize);        // emit current prefix
+            if (ds < 4096) { dict[wc] = ds; ++ds; }
+            // The first emitted code pairs with the decoder's out-of-loop code,
+            // which does NOT bump. All later codes bump once each.
+            if (!first) bump();
+            first = false;
+            w = std::string(1, c);
+        }
+    }
+    if (!w.empty()) {
+        writeCode(dict[w], codeSize);            // final prefix
+        // No later code follows, so bumping is irrelevant for the peer.
+    }
+    if (nbits > 0) buf.push_back((uint8_t)(cur << (8 - nbits)));  // flush
+    out.assign((const char*)buf.data(), buf.size());
+    return true;
+}
+
+bool CommandHandler::SendFeiQShotPayload(const UserInfo& target, const std::string& payload,
+                                           int dw, int dh, uint32_t refCmd, uint32_t fragCmd) {
+    if (refCmd == 0) refCmd = IPMSG_SENDMSG | IPMSG_SENDCHECKOPT | 0x1;   // 0x121
+    if (fragCmd == 0) fragCmd = IPMSG_FILEATTACHOPT | 0xC0;              // 0x2000C0
+
+    const size_t fragSize = 512;
+    size_t total = payload.size();
+    size_t fragCount = (total + fragSize - 1) / fragSize;
+    if (fragCount == 0) fragCount = 1;
+
+    // 8-hex screenshot id.
+    static unsigned ssSeq = 0;
+    uint32_t rnd = (uint32_t)((GetTickCount() ^
+                               (std::hash<std::string>{}(target.Key())) ^
+                               (++ssSeq * 2654435761u)) & 0xFFFFFFFF);
+    char idBuf[16];
+    snprintf(idBuf, sizeof(idBuf), "%08X", rnd);
+    std::string id = idBuf;
+
+    // Reference message: the inline-image marker "/~#><id>" matches the exact
+    // format FeiQ itself uses. Dimensions mirror the real image so FeiQ sizes
+    // the inline image correctly.
+    std::string ref = "/~#>" + id + "<B~{/font;-11 0 0 0 " +
+        std::to_string(dw) + " 0 0 0 " + std::to_string(dh) +
+        " 0 0 2 32 微软雅黑 8404992;}";
+    LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] Reference=\"" + ref + "\"");
+    msgMng_->SendMessage(target, ref, refCmd);
+
+    // DIAG dump of the verbatim payload for offline byte-diff.
+    {
+        std::ofstream o1(GetUserDownloadsDir() + "/FeiQ_OurTX_payload_" + id + ".bin", std::ios::binary);
+        if (o1) o1.write(payload.data(), (std::streamsize)payload.size());
+        LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] ref command=0x" +
+            std::to_string(refCmd) + " (decimal " + std::to_string(refCmd) + ")");
+    }
+
+    char mtBuf[16];
+    snprintf(mtBuf, sizeof(mtBuf), "%08X", 0);  // mtime always 0
+
+    for (size_t i = 0; i < fragCount; ++i) {
+        size_t off = i * fragSize;
+        size_t len = (total - off < fragSize) ? (total - off) : fragSize;
+        std::string chunk = payload.substr(off, len);
+
+        std::string hdr;
+        auto num = [&](size_t v) { hdr += std::to_string(v); hdr += '|'; };
+        hdr += id; hdr += '|';
+        num(total);
+        num(off);
+        num(fragCount);
+        num(i + 1);
+        num(len);
+        hdr += "0|2|0|";
+        hdr += mtBuf;
+        hdr += '#';
+
+        if (i == 0) {
+            LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] Fragment header (ours)=" + hdr +
+                "  [fields: id|total|off|fragCount|fragIndex|len|0|2|0|mtime]");
+            LogMessage("BRIDGE", "", "[FEIQ-SHOT-TX] frag command=0x" +
+                std::to_string(fragCmd) + " (decimal " + std::to_string(fragCmd) + ")");
+        }
+
+        // Fragment body = raw LZW payload immediately after '#'. The fragment
+        // command MUST be exactly fragCmd (SendMessage would OR in 0x20).
+        std::string body = hdr;
+        body += chunk;
+
+        if (i == 0) {
+            std::ofstream of(GetUserDownloadsDir() + "/FeiQ_OurTX_frag0_" + id + ".bin", std::ios::binary);
+            if (of) of.write(body.data(), (std::streamsize)body.size());
+        }
+
+        msgMng_->SendRawCommand(target, fragCmd, body);
+    }
+    return true;
+}
+
+nlohmann::json CommandHandler::HandleFeiQEchoScreenshot(const nlohmann::json& args) {
+    nlohmann::json r;
+    r["success"] = false;
+    try {
+        std::string payload, senderKey;
+        uint32_t refCmd = 0, fragCmd = 0;
+        int dw = 400, dh = 134;
+        {
+            std::lock_guard<std::mutex> lk(feiqMutex_);
+            payload = lastFeiQShotPayload_;
+            senderKey = lastFeiQShotSender_;
+            refCmd = lastFeiQShotRefCmd_;
+            fragCmd = lastFeiQShotFragCmd_;
+            dw = lastFeiQShotW_;
+            dh = lastFeiQShotH_;
+        }
+        if (payload.empty()) {
+            r["error"] = "没有可回显的飞秋截图（请先收到一张飞秋发来的截图）";
+            return r;
+        }
+        // Target: explicit arg wins; otherwise echo back to the original sender.
+        nlohmann::json a = args;
+        if ((!a.contains("target") || !a["target"].is_string() ||
+             a["target"].get<std::string>().empty()) && !senderKey.empty()) {
+            a["target"] = senderKey;
+        }
+        auto target = FindUserFromArgs(a);
+        if (!target) { r["error"] = "未找到目标用户"; return r; }
+
+        uint32_t useRef = refCmd ? refCmd : (IPMSG_SENDMSG | IPMSG_SENDCHECKOPT | 0x1);
+        uint32_t useFrag = fragCmd ? fragCmd : (IPMSG_FILEATTACHOPT | 0xC0);
+        LogMessage("BRIDGE", "", "[FEIQ-ECHO] ENTER target=" + target->Key() +
+            " payload=" + std::to_string(payload.size()) +
+            " refCmd=0x" + std::to_string(useRef) +
+            " fragCmd=0x" + std::to_string(useFrag));
+
+        SendFeiQShotPayload(*target, payload, dw, dh, useRef, useFrag);
+
+        // DIAG: dump the echoed payload so it can be compared with the original
+        // FeiQ_RawLZW_*.bin byte-for-byte.
+        {
+            static unsigned eSeq = 0;
+            char buf[16]; snprintf(buf, sizeof(buf), "%08X", ++eSeq);
+            std::ofstream o(GetUserDownloadsDir() + "/FeiQ_EchoTX_payload_" + std::string(buf) + ".bin", std::ios::binary);
+            if (o) o.write(payload.data(), (std::streamsize)payload.size());
+        }
+        r["success"] = true;
+        r["bytes"] = (int)payload.size();
+    } catch (const std::exception& e) {
+        r["error"] = e.what();
+    }
+    return r;
+}
+
 void CommandHandler::HandleFeiQScreenshotReference(const ipmsg::MsgBuf& msg, const std::string& body) {
     // body: "/~#><id><...>"
     size_t start = 4; // skip "/~#>"
@@ -1643,8 +2398,13 @@ void CommandHandler::HandleFeiQScreenshotReference(const ipmsg::MsgBuf& msg, con
     std::string id = body.substr(start, end - start);
     if (id.empty()) return;
 
+    LogMessage("BRIDGE", "", "[FEIQ-SHOT-RX] Reference body=\"" + body + "\" id=" + id);
     LogMessage("BRIDGE", "", "[FEIQ-SHOT] Reference received id=" + id +
-        " from=" + msg.sender.Key());
+        " from=" + msg.sender.Key() + " command=0x" + std::to_string(msg.command));
+    {
+        std::lock_guard<std::mutex> lk(feiqMutex_);
+        lastFeiQShotRefCmd_ = msg.command;   // remember FeiQ's own ref command
+    }
     // NOTE: We deliberately do NOT emit file.receive_request here. FeiQ screenshots
     // are reassembled entirely on the backend, so there is no standard file transfer
     // for the frontend to "accept". Emitting it would create a stuck "waiting to
@@ -1657,6 +2417,11 @@ bool CommandHandler::HandleFeiQScreenshotFragment(const ipmsg::MsgBuf& msg) {
     const std::string& body = msg.body;
     size_t hash = body.find('#');
     if (hash == std::string::npos || hash == 0) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(feiqMutex_);
+        lastFeiQShotFragCmd_ = msg.command;  // remember FeiQ's own fragment command
+    }
 
     // header must look like "<hexid>|<digits>|<digits>|<digits>|<digits>|<digits>|..."
     std::string header = body.substr(0, hash);
@@ -1686,6 +2451,10 @@ bool CommandHandler::HandleFeiQScreenshotFragment(const ipmsg::MsgBuf& msg) {
     int fragSize  = ToInt(f[5]);
     (void)fragSize;
     std::string mtime = (f.size() >= 10) ? f[9] : "";  // observed always "00000000"
+    // DIAG: log the real FeiQ fragment header (once per screenshot) so we can
+    // compare its field layout against what we SEND ([FEIQ-SHOT-TX]).
+    if (fragIndex == 1)
+        LogMessage("BRIDGE", "", "[FEIQ-SHOT-RX] Fragment header (real FeiQ)=" + header);
 
     std::string data = body.substr(hash + 1);
     // Each fragment carries a single leading 0x00 before the image chunk.
@@ -1755,6 +2524,16 @@ void CommandHandler::FinalizeFeiQScreenshot(const std::string& id) {
         buf += fit->second;
     }
 
+    // Keep the verbatim FeiQ payload (the "LZW!" + size + crc + LZW(DIB) bytes we
+    // just reassembled) so the UI can echo it back to the sender byte-for-byte.
+    // NOTE: `buf` is later overwritten with a decoded BMP for display, so we must
+    // snapshot it here.
+    {
+        std::lock_guard<std::mutex> lk(feiqMutex_);
+        lastFeiQShotPayload_ = buf;
+        lastFeiQShotSender_ = shot.senderKey;
+    }
+
     // Diagnostics: log magic bytes so we can verify the decoded image format
     {
         std::ostringstream os;
@@ -1809,6 +2588,9 @@ void CommandHandler::FinalizeFeiQScreenshot(const std::string& id) {
             int32_t biWidth = (int32_t)le32(dib, 4);
             int32_t biHeight = (int32_t)le32(dib, 8);
             uint16_t biBitCount = le16(dib, 14);
+            LogMessage("BRIDGE", "", "[FEIQ-SHOT-RX] DIB w=" + std::to_string(biWidth) +
+                " h=" + std::to_string(biHeight) + " bitcount=" + std::to_string(biBitCount) +
+                " sizeImage=" + std::to_string(le32(dib, 20)));
             if (biSize < 40 || biSize > 256 || biWidth <= 0 || biHeight == 0 ||
                 (biBitCount != 24 && biBitCount != 32)) {
                 validDib = false;
@@ -1889,6 +2671,11 @@ void CommandHandler::FinalizeFeiQScreenshot(const std::string& id) {
                     " biWidth=" + std::to_string(biWidth) +
                     " biHeight=" + std::to_string(biHeight) +
                     " bpp=" + std::to_string(biBitCount));
+                {
+                    std::lock_guard<std::mutex> lk(feiqMutex_);
+                    lastFeiQShotW_ = biWidth;
+                    lastFeiQShotH_ = biHeight;
+                }
             }
         }
         if (!validDib) {

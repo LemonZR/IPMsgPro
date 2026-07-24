@@ -842,7 +842,7 @@ void Window::SetupBridge() {
                             // Blocking commands (like dialog.pick_folder) must be deferred
                             // to the UI thread via PostMessage, because calling blocking
                             // modal dialogs inside WebView2's callback can cause issues.
-                            if (cmd == "dialog.pick_folder" || cmd == "dialog.open") {
+                            if (cmd == "dialog.pick_folder" || cmd == "dialog.open" || cmd == "dialog.save" || cmd == "screenshot.capture") {
                                 // Enqueue request to Window's async invoke queue
                                 {
                                     std::lock_guard<std::mutex> lock(self->asyncInvokeMutex_);

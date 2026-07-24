@@ -29,6 +29,8 @@ export interface Message {
   fileInfo?: FileInfoAttachment;
   /** Transfer progress (0-100), only for file/image in transit */
   transferProgress?: number;
+  /** True for screenshots received via the FeiQ inline protocol (can be echoed back) */
+  isFeiqShot?: boolean;
 }
 
 /** File attachment info attached to a message */
@@ -56,7 +58,7 @@ export interface Config {
 }
 
 /** Application version */
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.4.0';
 
 /** File transfer type */
 export interface FileTransfer {

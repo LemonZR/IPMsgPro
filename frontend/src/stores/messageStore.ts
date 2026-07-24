@@ -167,21 +167,20 @@ export const useMessageStore = create<MessageStore>((set, get) => ({
   sendImage: async (target, base64Data, filename) => {
     console.log(`[IMG_SEND] target=${target}, filename=${filename}, dataSize=${base64Data.length}`);
     try {
+      // 截图/图片统一走标准文件传输通道（TCP），对方以“接收/确认”方式接收，
+      // 不再使用飞秋内联富文本（引用消息 + 分片）协议。
       const saveResult = await invoke<{ success: boolean; filePath?: string; error?: string }>(
         'file.save_temp',
         { data: base64Data, filename }
       );
-
       if (!saveResult.success || !saveResult.filePath) {
-        console.error('Failed to save temp file:', saveResult.error);
+        console.error('[IMG_SEND] Failed to save temp file:', saveResult.error);
         return false;
       }
-
       const result = await invoke<{ success: boolean; transferId?: string; fileName?: string; error?: string }>(
-        'message.send_image',
+        'file.send',
         { target, filePath: saveResult.filePath }
       );
-
       if (result.success) {
         const displayName = result.fileName || filename;
         const msg: Message = {
@@ -203,6 +202,7 @@ export const useMessageStore = create<MessageStore>((set, get) => ({
         get().recvMessage(msg);
         return true;
       }
+      console.error('[IMG_SEND] file.send failed:', result.error);
       return false;
     } catch (err) {
       console.error('sendImage error:', err);
@@ -898,6 +898,7 @@ updateTransferProgress: (transferId, progress, isSending) => {
         fromUser: data.fromUser,
         fileInfo: { fileName: data.fileName, fileSize: data.fileSize || 0, filePath: data.savePath },
         transferProgress: 100,
+        isFeiqShot: true,
       };
       get().recvMessage(msg);
     }));

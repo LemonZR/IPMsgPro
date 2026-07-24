@@ -1,10 +1,11 @@
 import React, { useRef, useEffect, useState, memo, useCallback } from 'react';
-import { FiImage, FiFile, FiSmile, FiX, FiCheck, FiAlertCircle, FiDownload, FiFolder, FiMoreHorizontal, FiTrash2 } from 'react-icons/fi';
+import { FiCamera, FiImage, FiFile, FiSmile, FiX, FiCheck, FiAlertCircle, FiDownload, FiFolder, FiMoreHorizontal, FiTrash2 } from 'react-icons/fi';
 import { useUserStore } from '../stores/userStore';
 import { useMessageStore, PendingFileReceive } from '../stores/messageStore';
 import { Message } from '../types';
 import { invoke, listen } from '../services/bridge';
 import { EMOJIS, buildEmojiMessage, parseEmojiId, emojiStyle, EMOJI_TOKEN_RE } from '../emojiData';
+import ScreenshotEditor from './ScreenshotEditor';
 
 // ============================================================================
 // Send Preview Modal - shown before sending image/file
@@ -99,6 +100,9 @@ export default function ChatPanel() {
   const [hasInput, setHasInput] = useState(false);
   const messageListRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+
+  // ---- Screenshot state ----
+  const [screenshot, setScreenshot] = useState<{ image: string; screenCount?: number } | null>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   // Last caret position inside the editor, so an emoji can be inserted there
   // even after the editor loses focus to the picker button.
@@ -237,29 +241,47 @@ export default function ChatPanel() {
     // Keep the picker open so multiple emojis can be added; click outside to close.
   };
 
+  // ---- Screenshot feature ----
+  // Clicking the screenshot button hides the window (handled in C++), captures the
+  // current monitor, then returns here so the full-screen editor can be shown.
+  const startScreenshot = async () => {
+    if (!currentUser) return;
+    try {
+      const res: any = await invoke('screenshot.capture');
+      if (!res || !res.success || !res.image) {
+        alert('截图失败：' + ((res && res.error) || '未知错误'));
+        return;
+      }
+      setScreenshot({
+        image: res.image,
+        screenCount: res.screenCount,
+      });
+      // 截图编辑器以全屏浮层呈现，选区阶段就把主窗口置顶，
+      // 否则会被其它窗口盖住、无法覆盖到要截取的内容。
+      try {
+        await invoke('window.set_always_on_top', { on_top: true });
+      } catch { /* ignore */ }
+    } catch (err) {
+      alert('截图失败：' + err);
+    }
+  };
+
+  const finishScreenshot = async (confirm: boolean, dataUrl?: string) => {
+    if (confirm && dataUrl && currentUser) {
+      const base64 = dataUrl.split(',')[1];
+      await sendImage(currentUser.id, base64, 'screenshot.png');
+    }
+    // Restore the window to its normal state and keep it on top.
+    try {
+      await invoke('window.restore');
+      await invoke('window.set_always_on_top', { on_top: true });
+    } catch { /* ignore */ }
+    setScreenshot(null);
+  };
+
   // ---- Image select & preview ----
   const handleImageClick = () => {
     imageInputRef.current?.click();
-  };
-
-  const handleImageSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith('image/')) {
-      alert('请选择图片文件');
-      return;
-    }
-
-    // Read data URL for preview
-    const reader = new FileReader();
-    reader.onload = () => {
-      setPreviewFile(file);
-      setPreviewMode('image');
-      setPreviewDataUrl(reader.result as string);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
   };
 
   const handleImageSend = async () => {
@@ -480,10 +502,10 @@ export default function ChatPanel() {
           </button>
           <button
             className="p-1.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
-            title="图片"
-            onClick={handleImageClick}
+            title="截图"
+            onClick={startScreenshot}
           >
-            <FiImage size={18} />
+            <FiCamera size={18} />
           </button>
           <button
             className="p-1.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
@@ -498,7 +520,7 @@ export default function ChatPanel() {
             type="file"
             accept="image/*"
             className="hidden"
-            onChange={handleImageSelected}
+            onChange={() => {}}
           />
         </div>
 
@@ -542,6 +564,16 @@ export default function ChatPanel() {
           dataUrl={previewDataUrl}
           onConfirm={previewMode === 'image' ? handleImageSend : handleFileSend}
           onCancel={handlePreviewCancel}
+        />
+      )}
+
+      {/* Full-screen screenshot editor */}
+      {screenshot && (
+        <ScreenshotEditor
+          image={screenshot.image}
+          screenCount={screenshot.screenCount}
+          onCancel={() => finishScreenshot(false)}
+          onConfirm={(dataUrl) => finishScreenshot(true, dataUrl)}
         />
       )}
     </div>

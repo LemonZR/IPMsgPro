@@ -27,13 +27,13 @@ BEGIN
         BEGIN
             VALUE "CompanyName",     "masonwu21"
             VALUE "FileDescription", "倍信 (IPMsg Pro) - 局域网即时通讯"
-            VALUE "FileVersion",     "1.3.0"
+            VALUE "FileVersion",     "1.4.0"
             VALUE "InternalName",    "IPMsgPro"
             VALUE "LegalCopyright",  "MIT License © 2026 masonwu21"
 
             VALUE "OriginalFilename","IPMsgPro.exe"
             VALUE "ProductName",     "倍信 (IPMsg Pro)"
-            VALUE "ProductVersion",  "1.3.0"
+            VALUE "ProductVersion",  "1.4.0"
         END
     END
     BLOCK "VarFileInfo"
