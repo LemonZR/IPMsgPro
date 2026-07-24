@@ -1,8 +1,0 @@
-D:\Work\CPlusPlus\IPMsgPro\src\main.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\main.obj
-D:\Work\CPlusPlus\IPMsgPro\src\logger.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\logger.obj
-D:\Work\CPlusPlus\IPMsgPro\src\ipmsg\msgmng.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\msgmng.obj
-D:\Work\CPlusPlus\IPMsgPro\src\ipmsg\network.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\network.obj
-D:\Work\CPlusPlus\IPMsgPro\src\bridge\command_handler.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\command_handler.obj
-D:\Work\CPlusPlus\IPMsgPro\src\database\message_db.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\message_db.obj
-D:\Work\CPlusPlus\IPMsgPro\src\file\file_transfer.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\file_transfer.obj
-D:\Work\CPlusPlus\IPMsgPro\build_x64\generated\resource_map.cpp;D:\Work\CPlusPlus\IPMsgPro\build_x64\IPMsgPro.dir\Release\resource_map.obj

@@ -88,7 +88,7 @@ constexpr uint32_t IPMSG_NOADDLISTOPT   = 0x00080000UL;
 constexpr uint32_t IPMSG_READCHECKOPT   = 0x00100000UL;
 
 // ---------- Buffer / Size Constants ----------
-constexpr int MAX_SOCKBUF    = 256 * 1024;
+constexpr int MAX_SOCKBUF    = 8 * 1024 * 1024;  // 8 MB: FeiQ bursts the whole screenshot-fragment set (~1MB of UDP packets) within tens of ms; a small buffer overflows and drops fragments so the image can never be reassembled.
 constexpr int MAX_UDPBUF     = 32 * 1024;
 constexpr int MAX_NAMEBUF    = 80;
 constexpr int MAX_VERBUF     = 40;

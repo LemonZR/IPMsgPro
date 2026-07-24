@@ -1604,9 +1604,7 @@ static bool LzwDecompress(const std::string& in, size_t inOff, size_t inLen,
     std::string prev(1, (char)code);
     out = prev;
     int codeSize = 9;
-    // The first code also counts toward the code-width counter (FeiQ's loadData
-    // increments `index` for every code read), so start at 257 to stay in sync
-    // with the encoder's width-bump points.
+    // Counter matching FeiQ's encoder width-bump cadence (see growth below).
     int index = 257;
 
     while (true) {
@@ -1628,6 +1626,10 @@ static bool LzwDecompress(const std::string& in, size_t inOff, size_t inLen,
         }
         prev = entry;
         ++index;
+        // FeiQ uses the "early change" convention: the code field widens one
+        // step earlier than the raw dictionary size implies, so the bump lines
+        // up with the encoder. Growing at ds == 2^codeSize (standard LZW) would
+        // desync and corrupt screenshots, so we match the original counter.
         if ((1 << codeSize) == index && codeSize < 12) ++codeSize;
     }
     return !out.empty();
@@ -1714,11 +1716,15 @@ bool CommandHandler::HandleFeiQScreenshotFragment(const ipmsg::MsgBuf& msg) {
             shot.frags[fragIndex] = std::move(data);
         }
         int have = (int)shot.frags.size();
-        LogMessage("BRIDGE", "", "[FEIQ-SHOT] Fragment id=" + id +
-            " mtime=" + mtime +
-            " idx=" + std::to_string(fragIndex) +
-            " bytes=" + std::to_string(shot.frags[fragIndex].size()) +
-            " have=" + std::to_string(have) + "/" + std::to_string(fragCount));
+        // IMPORTANT: do NOT log every fragment. FeiQ bursts the entire fragment
+        // set within tens of milliseconds (thousands of UDP packets); per-packet
+        // synchronous disk logging blocks the receive thread and overflows the UDP
+        // receive buffer, dropping fragments so the set can never be reassembled.
+        // Only log at coarse progress steps.
+        if (have % 100 == 0 || have == fragCount) {
+            LogMessage("BRIDGE", "", "[FEIQ-SHOT] Progress id=" + id +
+                " have=" + std::to_string(have) + "/" + std::to_string(fragCount));
+        }
         if (fragCount > 0 && have >= fragCount) complete = true;
     }
 
