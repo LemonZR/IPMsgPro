@@ -5,7 +5,7 @@
 //   1. ChatPanel calls `screenshot.capture` (C++ hides the window, captures the
 //      current monitor, returns a base64 PNG, then re-shows the window maximised).
 //   2. ChatPanel renders <ScreenshotEditor> with that image.
-//   3. User drags to select a region, then annotates (rect / arrow / text / mosaic).
+//   3. User drags to select a region, then annotates (rect / arrow / pencil / mosaic).
 //   4. Confirm -> onConfirm(dataUrl) (ChatPanel sends it as an image message).
 //      Save    -> writes the image to a file chosen via the native save dialog.
 //      Cancel  -> onCancel() (ChatPanel restores the window).
@@ -14,13 +14,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { invoke } from '../services/bridge';
 
-type Tool = 'rect' | 'arrow' | 'text' | 'mosaic';
+type Tool = 'rect' | 'arrow' | 'pencil' | 'mosaic';
 
 interface RectAnno  { type: 'rect';  x: number; y: number; w: number; h: number; color: string; width: number; }
 interface ArrowAnno { type: 'arrow'; x1: number; y1: number; x2: number; y2: number; color: string; width: number; }
-interface TextAnno  { type: 'text';  x: number; y: number; text: string; color: string; size: number; }
+interface PencilAnno{ type: 'pencil'; points: { x: number; y: number }[]; color: string; width: number; }
 interface MosaicAnno{ type: 'mosaic';x: number; y: number; w: number; h: number; block: number; }
-type Annotation = RectAnno | ArrowAnno | TextAnno | MosaicAnno;
+type Annotation = RectAnno | ArrowAnno | PencilAnno | MosaicAnno;
 
 interface ScreenshotEditorProps {
   image: string;                 // data URL of the captured monitor
@@ -40,6 +40,92 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+// ---- SVG Icons for tools ----
+function RectIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="1" />
+    </svg>
+  );
+}
+
+function ArrowIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="20" x2="20" y2="4" />
+      <polyline points="9 4 20 4 20 15" />
+    </svg>
+  );
+}
+
+function PencilIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+    </svg>
+  );
+}
+
+function MosaicIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} stroke="none">
+      <rect x="2" y="2" width="6" height="6" />
+      <rect x="9" y="2" width="6" height="6" opacity="0.3" />
+      <rect x="16" y="2" width="6" height="6" />
+      <rect x="2" y="9" width="6" height="6" opacity="0.3" />
+      <rect x="9" y="9" width="6" height="6" />
+      <rect x="16" y="9" width="6" height="6" opacity="0.3" />
+      <rect x="2" y="16" width="6" height="6" />
+      <rect x="9" y="16" width="6" height="6" opacity="0.3" />
+      <rect x="16" y="16" width="6" height="6" />
+    </svg>
+  );
+}
+
+function UndoIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="7 4 3 8 7 12" />
+      <path d="M3 8h10a5 5 0 0 1 0 10h-2" />
+    </svg>
+  );
+}
+
+function RedoSelectIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="2 3">
+      <rect x="3" y="3" width="18" height="18" rx="1" />
+    </svg>
+  );
+}
+
+function SaveIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v12" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="3" y1="20" x2="21" y2="20" />
+    </svg>
+  );
+}
+
+function CheckIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function CloseIcon({ size = 18, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
 export default function ScreenshotEditor({ image, screenCount, onCancel, onConfirm }: ScreenshotEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -54,10 +140,8 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
   const [tool, setTool] = useState<Tool | null>('rect');
   const [color, setColor] = useState('#ff3b30');
   const [strokeWidth, setStrokeWidth] = useState(3);
-  const [textInput, setTextInput] = useState<{ x: number; y: number; value: string; visible: boolean }>({ x: 0, y: 0, value: '', visible: false });
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
-  const textInputRef = useRef<HTMLInputElement>(null);
 
   // ---- Load the captured image into an offscreen base canvas ----
   useEffect(() => {
@@ -113,11 +197,18 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
       ctx.moveTo(a.x2, a.y2);
       ctx.lineTo(a.x2 + head * Math.cos(a2), a.y2 + head * Math.sin(a2));
       ctx.stroke();
-    } else if (a.type === 'text') {
-      ctx.fillStyle = a.color;
-      ctx.font = `${Math.max(8, a.size * scale)}px sans-serif`;
-      ctx.textBaseline = 'top';
-      ctx.fillText(a.text, a.x, a.y);
+    } else if (a.type === 'pencil') {
+      if (a.points.length < 2) return;
+      ctx.strokeStyle = a.color;
+      ctx.lineWidth = Math.max(1, a.width * scale);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(a.points[0].x, a.points[0].y);
+      for (let i = 1; i < a.points.length; i++) {
+        ctx.lineTo(a.points[i].x, a.points[i].y);
+      }
+      ctx.stroke();
     } else if (a.type === 'mosaic') {
       const bw = Math.max(4, Math.round(a.block * scale));
       const tmpW = Math.max(1, Math.floor(a.w / bw));
@@ -127,7 +218,6 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
       tmp.height = tmpH;
       const tctx = tmp.getContext('2d')!;
       tctx.imageSmoothingEnabled = false;
-      // Pixelate from the original screenshot region (sel is in full-image coords).
       tctx.drawImage(base, s.x + a.x, s.y + a.y, a.w, a.h, 0, 0, tmpW, tmpH);
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(tmp, 0, 0, tmpW, tmpH, a.x, a.y, a.w, a.h);
@@ -191,7 +281,7 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
     canvas.style.height = '100%';
 
     draw();
-  }, [loaded, phase, sel, annotations, current, color, strokeWidth, textInput, getNatural, draw]);
+  }, [loaded, phase, sel, annotations, current, color, strokeWidth, getNatural, draw]);
 
   // Re-fit on window resize.
   useEffect(() => {
@@ -222,15 +312,16 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
       dragStartRef.current = p;
       setSel(null);
     } else if (tool) {
-      if (tool === 'text') {
-        setTextInput({ x: p.x, y: p.y, value: '', visible: true });
-        setTimeout(() => textInputRef.current?.focus(), 0);
-        return;
-      }
       dragStartRef.current = p;
-      if (tool === 'rect') setCurrent({ type: 'rect', x: p.x, y: p.y, w: 0, h: 0, color, width: strokeWidth });
-      else if (tool === 'arrow') setCurrent({ type: 'arrow', x1: p.x, y1: p.y, x2: p.x, y2: p.y, color, width: strokeWidth });
-      else if (tool === 'mosaic') setCurrent({ type: 'mosaic', x: p.x, y: p.y, w: 0, h: 0, block: Math.max(8, strokeWidth * 4) });
+      if (tool === 'pencil') {
+        setCurrent({ type: 'pencil', points: [p], color, width: strokeWidth });
+      } else if (tool === 'rect') {
+        setCurrent({ type: 'rect', x: p.x, y: p.y, w: 0, h: 0, color, width: strokeWidth });
+      } else if (tool === 'arrow') {
+        setCurrent({ type: 'arrow', x1: p.x, y1: p.y, x2: p.x, y2: p.y, color, width: strokeWidth });
+      } else if (tool === 'mosaic') {
+        setCurrent({ type: 'mosaic', x: p.x, y: p.y, w: 0, h: 0, block: Math.max(8, strokeWidth * 4) });
+      }
     }
   };
 
@@ -246,7 +337,9 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
         h: Math.abs(p.y - start.y),
       });
     } else if (current) {
-      if (current.type === 'rect') {
+      if (current.type === 'pencil') {
+        setCurrent({ ...current, points: [...current.points, p] });
+      } else if (current.type === 'rect') {
         setCurrent({ ...current, x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) });
       } else if (current.type === 'mosaic') {
         setCurrent({ ...current, x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) });
@@ -269,17 +362,11 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
       let tiny = false;
       if (c.type === 'rect' || c.type === 'mosaic') tiny = c.w < 3 && c.h < 3;
       else if (c.type === 'arrow') tiny = Math.hypot((c as ArrowAnno).x2 - (c as ArrowAnno).x1, (c as ArrowAnno).y2 - (c as ArrowAnno).y1) < 3;
+      else if (c.type === 'pencil') tiny = c.points.length < 3;
       if (!tiny) setAnnotations((a) => [...a, c]);
       setCurrent(null);
     }
     void start;
-  };
-
-  const commitText = () => {
-    if (textInput.value.trim()) {
-      setAnnotations((a) => [...a, { type: 'text', x: textInput.x, y: textInput.y, text: textInput.value, color, size: Math.max(16, strokeWidth * 6) }]);
-    }
-    setTextInput({ ...textInput, visible: false, value: '' });
   };
 
   // ---- Confirm / Save / Cancel ----
@@ -304,7 +391,14 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
     if (!dataUrl) return;
     const base64 = dataUrl.split(',')[1];
     try {
-      const res: any = await invoke('dialog.save', { title: '保存截图', default_name: 'screenshot.png' });
+      const now = new Date();
+      const ts = now.getFullYear().toString() +
+        String(now.getMonth() + 1).padStart(2, '0') +
+        String(now.getDate()).padStart(2, '0') +
+        String(now.getHours()).padStart(2, '0') +
+        String(now.getMinutes()).padStart(2, '0') +
+        String(now.getSeconds()).padStart(2, '0');
+      const res: any = await invoke('dialog.save', { title: '保存截图', default_name: `Beixin_${ts}_screenshot.png` });
       if (res && res.success && res.path) {
         const sres: any = await invoke('file.save_data', { data: base64, path: res.path });
         if (!sres || !sres.success) alert('保存失败: ' + ((sres && sres.error) || '未知错误'));
@@ -314,19 +408,23 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
     }
   };
 
-  // Esc cancels (unless editing text).
+  // Esc cancels.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !textInput.visible) onCancel();
+      if (e.key === 'Escape') onCancel();
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [textInput.visible, onCancel]);
+  }, [onCancel]);
 
   const isEditing = phase === 'edit';
-  const canvasRect = canvasRef.current?.getBoundingClientRect();
-  const scaleX = canvasRect && canvasRef.current ? canvasRect.width / canvasRef.current.width : 1;
-  const scaleY = canvasRect && canvasRef.current ? canvasRect.height / canvasRef.current.height : 1;
+
+  const toolItems: { key: Tool; icon: React.ReactNode; title: string }[] = [
+    { key: 'rect', icon: <RectIcon />, title: '矩形' },
+    { key: 'arrow', icon: <ArrowIcon />, title: '箭头' },
+    { key: 'pencil', icon: <PencilIcon />, title: '铅笔' },
+    { key: 'mosaic', icon: <MosaicIcon />, title: '马赛克' },
+  ];
 
   return (
     <div
@@ -341,66 +439,6 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
         fontFamily: 'system-ui, sans-serif',
       }}
     >
-      <style>{`
-        .ss-btn {
-          padding: 5px 14px; border-radius: 4px; cursor: pointer;
-          border: 1px solid #666; background: #3a3a3a; color: #eee; font-size: 13px;
-        }
-        .ss-btn:hover:not(:disabled) { background: #4a4a4a; }
-        .ss-btn:disabled { opacity: 0.4; cursor: default; }
-        .ss-cancel:hover:not(:disabled) { background: #6b2b2b; border-color: #a44; }
-        .ss-ok { background: #1e90ff; border-color: #1e90ff; color: #fff; }
-        .ss-ok:hover:not(:disabled) { background: #0f7fe0; }
-      `}</style>
-
-      {/* Top toolbar */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: '8px 12px',
-          background: '#2b2b2b',
-          color: '#eee',
-          flexWrap: 'wrap',
-          borderBottom: '1px solid #000',
-        }}
-      >
-        {!isEditing && <span style={{ fontWeight: 600 }}>拖动鼠标选择要截取的屏幕区域</span>}
-        {isEditing && (
-          <>
-            <ToolButton active={tool === 'rect'}  onClick={() => setTool('rect')}  label="矩形" />
-            <ToolButton active={tool === 'arrow'} onClick={() => setTool('arrow')} label="箭头" />
-            <ToolButton active={tool === 'text'} onClick={() => setTool('text')} label="文字" />
-            <ToolButton active={tool === 'mosaic'}onClick={() => setTool('mosaic')}label="马赛克" />
-            <span style={{ width: 1, height: 22, background: '#555' }} />
-            <div style={{ display: 'flex', gap: 4 }}>
-              {PRESET_COLORS.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setColor(c)}
-                  title={c}
-                  style={{
-                    width: 20, height: 20, borderRadius: '50%',
-                    background: c, cursor: 'pointer',
-                    border: color === c ? '2px solid #fff' : '1px solid #777',
-                  }}
-                />
-              ))}
-            </div>
-            <span style={{ width: 1, height: 22, background: '#555' }} />
-            <label style={{ fontSize: 12, opacity: 0.8 }}>粗细</label>
-            <input type="range" min={1} max={12} value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value))} />
-            <button className="ss-btn" onClick={() => setAnnotations((a) => a.slice(0, -1))} disabled={annotations.length === 0}>撤销</button>
-            <button className="ss-btn" onClick={() => { setPhase('select'); setSel(null); setAnnotations([]); setCurrent(null); }}>重新选择</button>
-          </>
-        )}
-        <div style={{ flex: 1 }} />
-        <button className="ss-btn" onClick={handleSave} disabled={!isEditing}>保存</button>
-        <button className="ss-btn ss-cancel" onClick={onCancel}>取消</button>
-        <button className="ss-btn ss-ok" onClick={handleConfirm} disabled={!isEditing}>确定</button>
-      </div>
-
       {/* Canvas area */}
       <div
         ref={containerRef}
@@ -416,59 +454,173 @@ export default function ScreenshotEditor({ image, screenCount, onCancel, onConfi
             onMouseLeave={onMouseUp}
             onDragStart={(e) => e.preventDefault()}
           />
-          {textInput.visible && (
-            <input
-              ref={textInputRef}
-              value={textInput.value}
-              autoFocus
-              onChange={(e) => setTextInput({ ...textInput, value: e.target.value })}
-              onBlur={commitText}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') commitText();
-                if (e.key === 'Escape') setTextInput({ ...textInput, visible: false, value: '' });
-              }}
-              style={{
-                position: 'absolute',
-                left: textInput.x * scaleX,
-                top: textInput.y * scaleY,
-                fontSize: Math.max(14, strokeWidth * 6 * scaleX),
-                color,
-                background: 'rgba(255,255,255,0.85)',
-                border: '1px solid #1e90ff',
-                outline: 'none',
-                padding: '2px 4px',
-                fontFamily: 'sans-serif',
-                zIndex: 2,
-              }}
-            />
-          )}
         </div>
+        {screenCount && screenCount > 1 && (
+          <div style={{ position: 'absolute', bottom: 12, left: 12, color: '#aaa', fontSize: 12, background: 'rgba(0,0,0,0.4)', padding: '4px 8px', borderRadius: 4 }}>
+            已截取当前屏幕（共 {screenCount} 屏）
+          </div>
+        )}
       </div>
 
-      {screenCount && screenCount > 1 && (
-        <div style={{ position: 'absolute', bottom: 12, left: 12, color: '#aaa', fontSize: 12, background: 'rgba(0,0,0,0.4)', padding: '4px 8px', borderRadius: 4 }}>
-          已截取当前屏幕（共 {screenCount} 屏）
-        </div>
-      )}
-    </div>
-  );
-}
+      {/* Bottom toolbar */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '6px 12px',
+          background: '#404040',
+          color: '#eee',
+          borderTop: '1px solid #555',
+        }}
+      >
+        {!isEditing && (
+          <span style={{ fontWeight: 500, fontSize: 13, opacity: 0.9 }}>拖动鼠标选择要截取的屏幕区域</span>
+        )}
+        {isEditing && (
+          <>
+            {/* Tool buttons */}
+            <div style={{ display: 'flex', gap: 2, background: '#222', borderRadius: 6, padding: 2 }}>
+              {toolItems.map(({ key, icon, title }) => (
+                <button
+                  key={key}
+                  onClick={() => setTool(key)}
+                  title={title}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 32,
+                    height: 32,
+                    borderRadius: 5,
+                    cursor: 'pointer',
+                    border: 'none',
+                    background: tool === key ? '#1e90ff' : 'transparent',
+                    color: tool === key ? '#fff' : '#bbb',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  {icon}
+                </button>
+              ))}
+            </div>
 
-function ToolButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: '4px 10px',
-        borderRadius: 4,
-        cursor: 'pointer',
-        border: '1px solid ' + (active ? '#1e90ff' : '#666'),
-        background: active ? '#1e90ff' : '#3a3a3a',
-        color: active ? '#fff' : '#ddd',
-        fontSize: 13,
-      }}
-    >
-      {label}
-    </button>
+            <div style={{ width: 1, height: 24, background: '#444', margin: '0 4px' }} />
+
+            {/* Color picker */}
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              {PRESET_COLORS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setColor(c)}
+                  title={c}
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: '50%',
+                    background: c,
+                    cursor: 'pointer',
+                    border: color === c ? '2px solid #fff' : '1.5px solid #666',
+                    boxShadow: color === c ? '0 0 4px rgba(255,255,255,0.4)' : 'none',
+                    transition: 'all 0.15s',
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </div>
+
+            <div style={{ width: 1, height: 24, background: '#444', margin: '0 4px' }} />
+
+            {/* Stroke width */}
+            <label style={{ fontSize: 11, opacity: 0.7, marginRight: 2 }}>粗细</label>
+            <input
+              type="range"
+              min={1}
+              max={12}
+              value={strokeWidth}
+              onChange={(e) => setStrokeWidth(Number(e.target.value))}
+              style={{ width: 60, accentColor: '#1e90ff' }}
+            />
+
+            <div style={{ width: 1, height: 24, background: '#444', margin: '0 4px' }} />
+
+            {/* Action buttons */}
+            <button
+              onClick={() => setAnnotations((a) => a.slice(0, -1))}
+              disabled={annotations.length === 0}
+              title="撤销"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: 32, height: 32, borderRadius: 5, border: 'none',
+                background: 'transparent', color: annotations.length ? '#bbb' : '#555',
+                cursor: annotations.length ? 'pointer' : 'default',
+                transition: 'all 0.15s',
+              }}
+            >
+              <UndoIcon />
+            </button>
+            <button
+              onClick={() => { setPhase('select'); setSel(null); setAnnotations([]); setCurrent(null); }}
+              title="重新选择"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: 32, height: 32, borderRadius: 5, border: 'none',
+                background: 'transparent', color: '#bbb', cursor: 'pointer',
+                transition: 'all 0.15s',
+              }}
+            >
+              <RedoSelectIcon />
+            </button>
+          </>
+        )}
+
+        <div style={{ flex: 1 }} />
+
+        {/* Right-side actions */}
+        <button
+          onClick={handleSave}
+          disabled={!isEditing}
+          title="保存"
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 32, height: 32, borderRadius: 5, border: '1px solid #666',
+            background: '#4a4a4a', color: isEditing ? '#ddd' : '#666',
+            cursor: isEditing ? 'pointer' : 'default',
+            transition: 'all 0.15s',
+          }}
+        >
+          <SaveIcon />
+        </button>
+        <button
+          onClick={onCancel}
+          title="取消"
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 32, height: 32, borderRadius: 5,
+            border: '1px solid #a33', background: '#5a1a1a',
+            color: '#f44', cursor: 'pointer',
+            transition: 'all 0.15s',
+          }}
+        >
+          <CloseIcon />
+        </button>
+        <button
+          onClick={handleConfirm}
+          disabled={!isEditing}
+          title="确定"
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 32, height: 32, borderRadius: 5,
+            border: isEditing ? '1px solid #2a2' : '1px solid #353',
+            background: isEditing ? '#1a4a1a' : '#2a3a2a',
+            color: isEditing ? '#4f4' : '#353',
+            cursor: isEditing ? 'pointer' : 'default',
+            transition: 'all 0.15s',
+          }}
+        >
+          <CheckIcon />
+        </button>
+      </div>
+    </div>
   );
 }

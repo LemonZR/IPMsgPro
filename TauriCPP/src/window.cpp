@@ -963,7 +963,8 @@ void Window::SetPosition(int x, int y) {
 void Window::SetAlwaysOnTop(bool on_top) {
     if (hwnd_) {
         HWND zIndex = on_top ? HWND_TOPMOST : HWND_NOTOPMOST;
-        SetWindowPos(hwnd_, zIndex, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        SetWindowPos(hwnd_, zIndex, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetForegroundWindow(hwnd_);
     }
 }
 

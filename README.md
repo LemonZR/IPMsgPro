@@ -1,4 +1,4 @@
-# 倍信 (IPMsg Pro) v1.4.0
+# 倍信 (IPMsg Pro) v1.4.5
 
 基于 [TauriCPP](https://github.com/masonwu21/TauriCPP) 框架和 [ipmsg-master](https://ipmsg.org/) 协议实现的局域网即时通讯应用，兼容飞秋和IPMsg v3.0 协议（UDP 2425 端口）。
 
@@ -102,6 +102,16 @@ cmake --build build_x86 --config Release
 - 文件传输进度实时显示，发送完成后进度保持在 100% 并显示「发送成功」，支持打开接收文件所在文件夹
 
 ## 更新日志
+
+### v1.4.5
+- **截图编辑器重构**
+  - 将文字工具替换为铅笔涂写工具，支持自由绘制
+  - 工具栏按钮改为 SVG 图标样式（矩形、箭头、铅笔、马赛克），视觉更直观
+  - 工具栏移至图片底部，操作更便捷
+  - 取消/确定按钮改为红色 X / 绿色 √ 图标按钮
+  - 截图文件命名改为 `Beixin_YYYYMMDDHHmmss_screenshot.png` 格式
+- **修复截图后窗口不在最前**
+  - `SetAlwaysOnTop` 增加 `SWP_SHOWWINDOW` 标志和 `SetForegroundWindow` 调用，确保截图结束后窗口回到前台
 
 ### v1.4.0
 - **截图发送改为标准文件传输**
