@@ -181,7 +181,15 @@ static std::wstring Utf8ToWide(const std::string& utf8) {
     if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
     return wstr;
 }
-
+static std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string utf8(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &utf8[0], len, nullptr, nullptr);
+    if (!utf8.empty() && utf8.back() == '\0') utf8.pop_back();
+    return utf8;
+}
 static bool IsValidUtf8(const std::string& str) {
     // Quick check: if all bytes are ASCII, it's valid UTF-8
     bool hasNonAscii = false;
@@ -2033,28 +2041,57 @@ nlohmann::json CommandHandler::HandleDialogPickFolder(const nlohmann::json& args
 }
 
 nlohmann::json CommandHandler::HandleDialogOpen(const nlohmann::json& args) {
-    std::string title = args.value("title", "选择文件");
-    bool multi = args.value("multi_select", false);
-    LogMessage("BRIDGE", "", "[DIALOG] HandleDialogOpen called, title=" + title);
-
-    if (!hwnd_) {
-        LogMessage("BRIDGE", "", "[DIALOG] ERROR: hwnd_ is null!");
-        return {{"success", false}, {"error", "Window handle not available"}};
-    }
-
+    if (!hwnd_) return {{"success", false}, {"error", "No window handle"}};
     HWND hWnd = static_cast<HWND>(hwnd_);
-    tauricpp::Dialog::OpenOptions opts;
-    opts.title = title;
-    opts.multi_select = multi;
+    bool multi = args.value("multi_select", false);
+
+    // 固定过滤器（避免前端传参造成乱码或记忆问题）
+    // 使用显式 push_back 构造，确保双空分隔符正确
+    std::wstring filterW;
+    filterW += L"所有文件 (*.*)"; filterW.push_back(L'\0');
+    filterW += L"*.*"; filterW.push_back(L'\0');
+    filterW += L"图片 (*.png;*.jpg;*.jpeg;*.gif;*.bmp)"; filterW.push_back(L'\0');
+    filterW += L"*.png;*.jpg;*.jpeg;*.gif;*.bmp"; filterW.push_back(L'\0');
+    filterW += L"文档 (*.txt;*.doc;*.docx;*.xls;*.xlsx)"; filterW.push_back(L'\0');
+    filterW += L"*.txt;*.doc;*.docx;*.xls;*.xlsx"; filterW.push_back(L'\0');
+    filterW.push_back(L'\0');  // 双空终止
+
+    std::wstring titleW = Utf8ToWide(args.value("title", "选择文件"));
+    std::vector<wchar_t> fileBuffer(32768, 0);
     if (args.contains("default_path") && args["default_path"].is_string()) {
-        opts.default_path = args["default_path"].get<std::string>();
+        std::wstring defaultPathW = Utf8ToWide(args["default_path"].get<std::string>());
+        if (!defaultPathW.empty()) {
+            wcsncpy_s(fileBuffer.data(), fileBuffer.size(), defaultPathW.c_str(), _TRUNCATE);
+        }
     }
 
-    // 返回 UTF-8 路径，后端的 StartSendFile 用 fs::u8path 正确解析中文路径
-    auto files = tauricpp::Dialog::OpenFile(hWnd, opts);
-    nlohmann::json arr = nlohmann::json::array();
-    for (const auto& f : files) arr.push_back(f);
-    return {{"success", true}, {"files", arr}};
+    OPENFILENAMEW ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWnd;
+    ofn.lpstrFilter = filterW.c_str();
+    ofn.lpstrFile = fileBuffer.data();
+    ofn.nMaxFile = (DWORD)fileBuffer.size();
+    ofn.lpstrTitle = titleW.c_str();
+    ofn.Flags = OFN_NOCHANGEDIR | OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    if (multi) ofn.Flags |= OFN_ALLOWMULTISELECT;
+
+    bool ok = (GetOpenFileNameW(&ofn) == TRUE);
+    if (!ok) return {{"success", true}, {"files", nlohmann::json::array()}};
+
+    // 解析路径（使用 WideToUtf8）
+    nlohmann::json files = nlohmann::json::array();
+    std::wstring dir = fileBuffer.data();
+    wchar_t* p = fileBuffer.data() + dir.length() + 1;
+    if (*p == L'\0') { // 单选
+        files.push_back(WideToUtf8(dir));
+    } else {
+        while (*p) {
+            std::wstring full = dir + L"\\" + p;
+            files.push_back(WideToUtf8(full));
+            p += wcslen(p) + 1;
+        }
+    }
+    return {{"success", true}, {"files", files}};
 }
 
 
